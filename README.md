@@ -143,6 +143,38 @@ The catalog is schema version 2 (`version.<catalog> TXT "2"`, member PTRs at `<l
 
 The 90-day clear-out runs on the DNS side. It asks the API, over the internal listener, to delete a zone. The API updates the catalogue and notifies the catalog zone.
 
+## Push a zone you signed yourself
+
+`tools/zone_push.py` is a maintainer utility. It is not copied into the container image. It does not sign zones and it does not change admission: the service still accepts only a full-zone `POST /api/v1/zones/{apex}` with `dnsauth#signedZone` JSON. The tool turns a master file, or an AXFR, into that JSON and sends it. A later file with a higher SOA serial is just another POST.
+
+Install dnspython with the development requirements, then:
+
+```sh
+pip install -r requirements-dev.txt
+
+# Print the JSON and do not contact the service. Stdout is only the document.
+python3 tools/zone_push.py --zone-file /tmp/user.example.zone --dry-run
+
+# POST it. The status and the service's JSON body are printed.
+python3 tools/zone_push.py \
+  --zone-file /tmp/user.example.zone \
+  --base-url http://127.0.0.1:80
+
+# Take the zone from an AXFR, then ask NSD whether the SOA serial matches.
+python3 tools/zone_push.py \
+  --axfr-zone user.example. \
+  --axfr-server 192.0.2.53 \
+  --axfr-port 53 \
+  --tsig-key-name transfer.example. \
+  --tsig-secret 'BASE64SECRET' \
+  --base-url http://127.0.0.1:80 \
+  --verify \
+  --dns-server 127.0.0.1 \
+  --dns-port 53
+```
+
+If the master file has no `$ORIGIN`, pass `--apex user.example.`. `--dry-run` writes a `request_id` on stderr so stdout stays valid JSON. A failed admission check is a non-zero exit and the HTTP status plus the JSON error body on stdout.
+
 ## Tests
 
 ```sh
