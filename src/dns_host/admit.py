@@ -8,9 +8,11 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from dns_host.catalog import catalog_soa
+from dns_host.catalogfile import Catalog
 from dns_host.errors import ApiError
 from dns_host.logutil import log
+from dns_host.spool import encode_job, submit
+from dns_host.wireaxfr import tcp_bytes
 from dns_host.pipeline import (
     ds_matches,
     next_expire_hint,
@@ -30,10 +32,15 @@ _PARENT_CACHE_ERRORS = {
 }
 
 
-def admit(body: dict, url_apex, settings, store, lookup, notifier, client_ip: str) -> tuple[dict, int]:
+def admit(body: dict, url_apex, settings, store, lookup, _notifier, client_ip: str) -> tuple[dict, int]:
     try:
-        held = store.get_zone(url_apex.to_text())
-        held_serial = held.serial if held else None
+        # The API's serial check fails fast from the catalog the controller
+        # publishes. The controller checks the serial again when it takes the
+        # spool file. NOTIFY is the UDP process, not this function.
+        catalog = Catalog(settings)
+        catalog.load()
+        held_serial = catalog.serial_of(url_apex.to_text())
+        catalog_updated = not catalog.has(url_apex.to_text())
         zone = parse_upload(body, url_apex)
         # RRset and name caps need a parsed document. Body size and the per-IP
         # limit are enforced by the HTTP layer before parse.
@@ -65,21 +72,25 @@ def admit(body: dict, url_apex, settings, store, lookup, notifier, client_ip: st
         store.incr("validate_ms_count")
         _enforce_parent_cap(settings, store, delegation.parent_zone.to_text(), url_apex.to_text())
         expiries = zone.rrsig_expiries()
-        catalog_updated, _catalog_serial = store.replace_zone(
-            apex=url_apex.to_text(),
-            serial=serial,
-            document=zone.to_document(),
-            now=settings.now(),
-            rrsig_min_expiry=min(expiries),
-            rrsig_max_expiry=max(expiries),
-            parent_zone=delegation.parent_zone.to_text(),
+        soa = zone.soa_rdata()
+        soa_rrset = zone.get(dns_soa())
+        submit(
+            _spool_dir(settings),
+            encode_job(
+                apex=url_apex.to_text(),
+                serial=serial,
+                expires_at=max(expiries),
+                parent_zone=delegation.parent_zone.to_text(),
+                soa=soa.to_text(),
+                soa_ttl=int(soa_rrset.ttl) if soa_rrset is not None else 300,
+                wire=tcp_bytes(zone.axfr_rrsets()),
+            ),
         )
         store.remember_parent_day(
             delegation.parent_zone.to_text(),
             url_apex.to_text(),
             datetime.fromtimestamp(settings.now(), timezone.utc).strftime("%Y-%m-%d"),
         )
-        _notify(settings, store, notifier, url_apex.to_text(), zone, catalog_updated)
         store.incr("upload_ok")
         log(
             "info",
@@ -166,13 +177,13 @@ def _enforce_parent_cap(settings, store, parent_zone: str, apex: str) -> None:
         raise ApiError(429, "rate_limited", "distinct apex cap for this parent has been reached today")
 
 
-def _notify(settings, store, notifier, apex: str, zone, catalog_updated: bool) -> None:
-    try:
-        if catalog_updated:
-            soa = catalog_soa(settings, store.catalog_serial())
-            notifier.notify(settings.catalog_zone.to_text(), soa)
-        import dns.rdatatype
+def dns_soa():
+    import dns.rdatatype
 
-        notifier.notify(apex, zone.get(dns.rdatatype.SOA))
-    except Exception as exc:
-        log("warning", "NOTIFY sequence failed", apex=apex, error=str(exc))
+    return dns.rdatatype.SOA
+
+
+def _spool_dir(settings):
+    from pathlib import Path
+
+    return Path(settings.data_dir) / "spool"

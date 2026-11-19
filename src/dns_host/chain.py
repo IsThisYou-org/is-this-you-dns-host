@@ -16,6 +16,7 @@ import dns.rdatatype
 import dns.rrset
 
 from dns_host.denial import bitmap_types
+from dns_host.dnskey_cache import get_process_cache
 from dns_host.doh import Lookup, LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.logutil import log
@@ -60,6 +61,7 @@ def authenticate_parent(lookup: Lookup, settings, apex: dns.name.Name) -> Delega
     try:
         if not settings.trust_anchors:
             raise ApiError(403, "parent_chain_invalid", "no trust anchors are configured")
+        cache = get_process_cache()
         try:
             return _walk_from_root(
                 capped,
@@ -68,6 +70,8 @@ def authenticate_parent(lookup: Lookup, settings, apex: dns.name.Name) -> Delega
                 now,
                 anchors=settings.trust_anchors,
                 root_server=None,
+                cache=cache,
+                root_id="icann",
             )
         except ApiError as first:
             if (
@@ -84,6 +88,8 @@ def authenticate_parent(lookup: Lookup, settings, apex: dns.name.Name) -> Delega
                     now,
                     anchors=settings.handshake_trust_anchors,
                     root_server=settings.handshake_root_servers[0].to_text(),
+                    cache=cache,
+                    root_id="handshake",
                 )
             raise
     except LookupError as exc:
@@ -97,14 +103,18 @@ def _tld_missing(error: ApiError) -> bool:
     return "does not exist" in error.message.lower()
 
 
-def _walk_from_root(lookup, settings, apex, now, anchors, root_server) -> Delegation:
-    dnskey, dnskey_sigs = _query_type(lookup, settings, dns.name.root, "DNSKEY", [root_server])
-    if dnskey is None or dnskey_sigs is None:
-        raise ApiError(503, "parent_lookup_unavailable", "root DNSKEY was not returned")
-    matched = _keys_matching_ds(dns.name.root, dnskey, anchors, settings.ds_digest_types)
-    if not matched:
-        raise ApiError(403, "parent_chain_invalid", "root DNSKEY does not match a configured trust anchor")
-    _verify(dnskey, dnskey_sigs, dns.name.root, _rrset_of(dns.name.root, dnskey.ttl, matched), now, "root DNSKEY")
+def _walk_from_root(lookup, settings, apex, now, anchors, root_server, cache=None, root_id="icann") -> Delegation:
+    dnskey, _dnskey_sigs = _cached_dnskey(
+        lookup,
+        settings,
+        dns.name.root,
+        [root_server],
+        anchors,
+        now,
+        "root DNSKEY",
+        cache,
+        root_id,
+    )
     ns_rrset, ns_sigs = _query_type(lookup, settings, dns.name.root, "NS", [root_server])
     if ns_rrset is None or ns_sigs is None:
         raise ApiError(503, "parent_lookup_unavailable", "root NS was not returned")
@@ -168,19 +178,16 @@ def _walk_from_root(lookup, settings, apex, now, anchors, root_server) -> Delega
                 f"insecure delegation at {child}; cannot continue the chain",
             )
         child_servers = [rdata.target.to_text() for rdata in ns_rrset]
-        child_dnskey, child_dnskey_sigs = _query_type(lookup, settings, child, "DNSKEY", child_servers)
-        if child_dnskey is None or child_dnskey_sigs is None:
-            raise ApiError(503, "parent_lookup_unavailable", f"DNSKEY for {child} was not returned")
-        matched = _keys_matching_ds(child, child_dnskey, list(ds_rrset), settings.ds_digest_types)
-        if not matched:
-            raise ApiError(403, "parent_chain_invalid", f"DNSKEY for {child} does not match the parent DS")
-        _verify(
-            child_dnskey,
-            child_dnskey_sigs,
+        child_dnskey, _child_dnskey_sigs = _cached_dnskey(
+            lookup,
+            settings,
             child,
-            _rrset_of(child, child_dnskey.ttl, matched),
+            child_servers,
+            list(ds_rrset),
             now,
             f"DNSKEY {child}",
+            cache,
+            root_id,
         )
         auth_ns, auth_ns_sigs = _query_type(lookup, settings, child, "NS", child_servers)
         if auth_ns is None or auth_ns_sigs is None:
@@ -190,6 +197,29 @@ def _walk_from_root(lookup, settings, apex, now, anchors, root_server) -> Delega
         parent_keys = child_dnskey
         parent_servers = [rdata.target.to_text() for rdata in auth_ns]
     raise ApiError(403, "parent_chain_invalid", f"walk did not reach {apex}")
+
+
+def _cached_dnskey(lookup, settings, name, servers, ds_records, now, what, cache, root_id):
+    """Return a DNSKEY RRset validated up to ``root_id``, using the worker cache."""
+
+    if cache is not None:
+        hit = cache.get(root_id, name.to_text(), now)
+        if hit is not None:
+            dnskey, signatures = hit
+            if _keys_matching_ds(name, dnskey, ds_records, settings.ds_digest_types):
+                return dnskey, signatures
+    dnskey, signatures = _query_type(lookup, settings, name, "DNSKEY", servers)
+    if dnskey is None or signatures is None:
+        raise ApiError(503, "parent_lookup_unavailable", f"{what} was not returned")
+    matched = _keys_matching_ds(name, dnskey, ds_records, settings.ds_digest_types)
+    if not matched:
+        raise ApiError(403, "parent_chain_invalid", f"{what} does not match the trust anchor or parent DS")
+    _verify(dnskey, signatures, name, _rrset_of(name, dnskey.ttl, matched), now, what)
+    if cache is not None:
+        expiry = min(int(item.expiration) for item in signatures)
+        horizon = int(now) + int(getattr(settings, "dnskey_cache_seconds", 3600) or 3600)
+        cache.put(root_id, name.to_text(), min(expiry, horizon), dnskey, signatures)
+    return dnskey, signatures
 
 
 def _query_type(lookup, settings, name, rdtype, servers, with_response=False):

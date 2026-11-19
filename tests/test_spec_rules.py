@@ -101,7 +101,11 @@ def test_provide_xfr_and_notify_come_from_one_secondary_list():
     text = render_nsd(settings, ["catalog.example.net.", "user.example."])
     assert upload["tsig_secret"] not in text
     assert "198.51.100.9" not in text
-    assert "request-xfr: 127.0.0.1@5353 NOKEY" in text
+    assert "request-xfr: AXFR 127.0.0.1@5353 NOKEY" in text
+    assert "catalog: consumer" in text
+    assert 'catalog-member-pattern: "catalog-member"' in text
+    assert text.count("\nzone:") == 1
+    assert "user.example" not in text
     provide = [
         line.split("provide-xfr:", 1)[1].strip()
         for line in text.splitlines()
@@ -112,8 +116,9 @@ def test_provide_xfr_and_notify_come_from_one_secondary_list():
         for line in text.splitlines()
         if line.strip().startswith("notify:")
     ]
-    assert provide == notify == ["192.0.2.10 one.example.", "192.0.2.11@5353 NOKEY"]
-    assert text.count("provide-xfr:") == len(settings.secondaries)
+    assert provide == notify
+    assert provide.count("192.0.2.10 one.example.") == 2
+    assert provide.count("192.0.2.11@5353 NOKEY") == 2
     assert "c2VjcmV0MQ==" in text
 
 
@@ -127,7 +132,7 @@ def test_internal_drop_updates_the_catalogue(env):
     assert response.status_code == 200, response.get_json()
     assert env.store.get_zone("user.example.") is None
     assert env.notifier.zones == ["catalog.svc.test."]
-    catalogue = json.loads((env.settings.data_dir / "zones" / "catalogue.json").read_text())
+    catalogue = json.loads((env.settings.data_dir / "catalog" / "catalog.json").read_text())
     assert catalogue["zones"] == []
 
 
@@ -137,10 +142,9 @@ def test_dns_serves_the_catalogue_file(env):
     server.start()
     try:
         assert any(rdtype == "SOA" for _name, rdtype, _text in _records(_xfr(server.port, "user.example.")))
-        path = env.settings.data_dir / "zones" / "catalogue.json"
+        path = env.settings.data_dir / "catalog" / "catalog.json"
         data = json.loads(path.read_text())
         data["zones"] = []
-        data["catalog_serial"] = int(data["catalog_serial"]) + 1
         path.write_text(json.dumps(data))
         catalog = _records(_xfr(server.port, "catalog.svc.test."))
         assert not any(rdtype == "PTR" for _name, rdtype, _text in catalog)

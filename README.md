@@ -2,7 +2,7 @@
 
 Account-less hidden primary for DNSSEC-signed zones. Anyone may upload a zone. It is accepted only when the zone validates, the parent DS matches a KSK in the zone, the parent NS set equals the apex NS set, and that set includes every nameserver of this deployment. The service never holds zone-signing keys.
 
-NSD is the public DNS relay. A Python master on localhost holds the zones and answers SOA and AXFR to NSD. NSD transfers from that master and is the only listener secondaries should use. The API is the only writer of zone files and the zone catalogue. The DNS side polls that catalogue about once a second.
+NSD is the only public DNS server. Internally, four supervised processes share `/opt/data`: the upload API, a zone-master controller, a UDP SOA/NOTIFY service, and a pre-fork TCP AXFR service. NSD transfers a single RFC 9432 catalog zone from the local AXFR service and learns user zones from that catalog. Its configuration is not rewritten when a zone is added.
 
 This repository is MIT licensed.
 
@@ -28,7 +28,8 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 | --- | --- | --- | --- |
 | 53/udp, 53/tcp | `0.0.0.0` | NSD, the public relay | yes |
 | 80/tcp | `0.0.0.0` | nginx external listener (`/api/` is the `/ext/` tree) | yes |
-| 5353/udp, 5353/tcp | `127.0.0.1` | Python master (SOA, AXFR; IXFR is NOTIMP and NSD falls back to AXFR) | no |
+| 5353/udp | `127.0.0.1` | UDP service: SOA answers and NOTIFY. Not published. | no |
+| 5353/tcp | `127.0.0.1` | Pre-fork AXFR service (default 5 children). IXFR is not requested. | no |
 | 8081/tcp | `127.0.0.1` | nginx internal listener (`/api/` is the `/int/` tree) | no |
 | 8000/tcp | `127.0.0.1` | gunicorn | no |
 
@@ -41,7 +42,9 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | Path | Contents |
 | --- | --- |
 | `/opt/data/etc/config.yaml` | Operator configuration. A missing file is empty configuration. |
-| `/opt/data/zones` | Zone files, `catalogue.json`, and their temp files |
+| `/opt/data/spool` | Validated AXFR payloads. `tmp/` holds the file before `rename`. |
+| `/opt/data/zones` | Installed zone wire, written by the controller |
+| `/opt/data/catalog` | Catalog file (zone names and full SOA records) and its mtime, which is the catalog SOA serial |
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
@@ -133,15 +136,26 @@ Only then does the service spend a parent-lookup token. Failed parent results ar
 
 The parent NS name set must equal the apex NS set. If the parent is missing a service NS the error is `parent_ns_incomplete` (403). Any other difference is `ns_set_mismatch` (422). The DS digest is compared to the uploaded KSK before any signature in the upload is verified. Signature verification is last.
 
-On success the API writes the zone file under `/opt/data/zones`, then rewrites `catalogue.json` (apex and SOA serial) by rename. The Python master notices the new mtime, parses the JSON into wire form, and NSD is reconfigured from the same secondary list.
+On success the API writes wire-format AXFR data into the spool (an empty `mktemp` file in `/opt/data/spool`, the bytes under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs the zone and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. NSD is not reloaded.
+
+## Processes
+
+| Process | How it runs | Role |
+| --- | --- | --- |
+| REST API | gunicorn, `GUNICORN_WORKERS` (default 3) | Admission and DNSSEC validation, unchanged. Caches DNSKEYs already validated to the ICANN or Handshake root. Spools wire, not JSON. |
+| Zone controller | one process | Polls the spool, ignores empty files, directories and hidden names, re-checks the SOA serial, installs the zone, ages out zones expired for more than 90 days. |
+| DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
+| DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
+| NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). |
+| cron | busybox `crond` | Deletes empty spool files and orphaned `tmp` files older than five minutes. |
 
 ## Secondaries
 
-NOTIFY is UDP. The API notifies the catalog zone first when membership changed, then the member zone. NSD is generated with the same `notify` targets, so a missed API notify is repeated after NSD has the zone. SOA is answered so a secondary can poll. AXFR from the public internet hits NSD, which allows exactly the configured secondary addresses. The Python master allows those addresses, a valid TSIG, and localhost (so NSD can transfer). A bad TSIG is refused. Set `axfr_require_tsig: true` to require TSIG as well.
+NOTIFY is UDP, from the UDP service: the catalog first when its serial changes, then each new or updated member. NSD's `provide-xfr` and `notify` lines are generated from the one secondary list, on the catalog zone and on the member pattern. NSD itself requests only AXFR (`request-xfr: AXFR`) from `127.0.0.1:5353`. Public AXFR is answered by NSD, not by the hidden TCP service. A bad TSIG on NSD's side is refused. Set `axfr_require_tsig: true` on the secondaries' keys when you want TSIG as well as the address.
 
-The catalog is schema version 2 (`version.<catalog> TXT "2"`, member PTRs at `<label>.zones.<catalog>`). It is not signed. The tests speak AXFR with dnspython. NSD on the public port is what a real secondary talks to.
+The catalog is schema version 2 (`version.<catalog> TXT "2"`, member PTRs at `<label>.zones.<catalog>`). It is not signed. The tests speak AXFR with dnspython. NSD on port 53 is what a real secondary talks to.
 
-The 90-day clear-out runs on the DNS side. It asks the API, over the internal listener, to delete a zone. The API updates the catalogue and notifies the catalog zone.
+The 90-day clear-out runs in the zone controller. Removing a zone updates the catalog; the UDP service notifies the catalog only.
 
 ## Push a zone you signed yourself
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+mkdir -p /opt/data/spool/tmp /opt/data/zones /opt/data/catalog
+exec python3 -m dns_host.controller

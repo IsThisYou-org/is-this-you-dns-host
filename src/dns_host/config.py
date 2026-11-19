@@ -142,7 +142,9 @@ class Settings:
     http_port: int = 80
     internal_http_port: int = 8081
     gunicorn_bind: str = "127.0.0.1:8000"
-    gunicorn_workers: int = 2
+    gunicorn_workers: int = 3
+    axfr_children: int = 5
+    dnskey_cache_seconds: int = 3600
     dns_bind: str = "127.0.0.1"
     dns_port: int = 5353
     nsd_bind: str = "0.0.0.0"
@@ -265,7 +267,9 @@ class Settings:
             http_port=_map_int(raw, "http_port", 80),
             internal_http_port=_map_int(raw, "internal_http_port", 8081),
             gunicorn_bind=str(raw.get("gunicorn_bind") or "127.0.0.1:8000"),
-            gunicorn_workers=_map_int(raw, "gunicorn_workers", 2),
+            gunicorn_workers=_map_int(raw, "gunicorn_workers", 3),
+            axfr_children=_map_int(raw, "axfr_children", 5),
+            dnskey_cache_seconds=_map_int(raw, "dnskey_cache_seconds", 3600),
             dns_bind=str(raw.get("dns_bind") or "127.0.0.1"),
             dns_port=_map_int(raw, "dns_port", 5353),
             nsd_bind=str(raw.get("nsd_bind") or "0.0.0.0"),

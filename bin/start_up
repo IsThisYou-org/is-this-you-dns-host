@@ -6,8 +6,11 @@ set -eu
 mkdir -p \
   /opt/data/log \
   /opt/data/zones \
+  /opt/data/catalog \
+  /opt/data/spool/tmp \
   /opt/data/etc \
   /opt/data/nsd/zones \
+  /opt/data/nsd/xfr \
   /opt/data/secrets \
   /run \
   /tmp/nginx-body \

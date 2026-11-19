@@ -32,7 +32,7 @@ def _key_token(secondary) -> str:
     return "NOKEY"
 
 
-def render_nsd(settings, zone_names: list[str]) -> str:
+def render_nsd(settings, zone_names: list[str] | None = None) -> str:
     """Render nsd.conf. ``zone_names`` are the catalog plus member apexes."""
 
     lines = [
@@ -79,55 +79,53 @@ def render_nsd(settings, zone_names: list[str]) -> str:
                 "",
             ]
         )
-    # The hidden master is localhost only. NSD falls back from IXFR to AXFR.
-    master = _endpoint("127.0.0.1", int(settings.dns_port))
+    # One catalog zone. NSD creates member zones from it; nothing here is
+    # rewritten when a user zone is added, and NSD is not reloaded.
+    # AXFR (not IXFR) from the local TCP service.
+    master = "AXFR " + _endpoint("127.0.0.1", int(settings.dns_port))
     lines.extend(
         [
             "pattern:",
-            '    name: "relay"',
+            '    name: "catalog-member"',
             f"    request-xfr: {master} NOKEY",
             "    allow-notify: 127.0.0.1 NOKEY",
-            "    allow-axfr-fallback: yes",
         ]
     )
+    _transfer_acl(lines, settings)
+    catalog_name = settings.catalog_zone.to_text().rstrip(".")
+    lines.extend(
+        [
+            "",
+            "zone:",
+            f'    name: "{catalog_name}"',
+            f"    request-xfr: {master} NOKEY",
+            "    allow-notify: 127.0.0.1 NOKEY",
+            "    catalog: consumer",
+            '    catalog-member-pattern: "catalog-member"',
+        ]
+    )
+    _transfer_acl(lines, settings)
+    lines.append("")
+    # zone_names is intentionally unused: members come from the catalog zone.
+    del zone_names
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _transfer_acl(lines: list[str], settings) -> None:
     for secondary in settings.secondaries:
         host, port = secondary[0], secondary[1]
         token = _key_token(secondary)
         endpoint = _endpoint(host, port)
         lines.append(f"    provide-xfr: {endpoint} {token}")
         lines.append(f"    notify: {endpoint} {token}")
-    lines.append("")
-    for name in zone_names:
-        zone = name[:-1] if name.endswith(".") else name
-        lines.extend(
-            [
-                "zone:",
-                f'    name: "{zone}"',
-                '    include-pattern: "relay"',
-                "",
-            ]
-        )
-    return "\n".join(lines).rstrip() + "\n"
 
 
-def write_nsd_config(settings, zone_names: list[str]) -> Path:
+def write_nsd_config(settings, zone_names: list[str] | None = None) -> Path:
+    """Write the static NSD config. Members are not listed and NSD is not reloaded."""
+
     path = nsd_conf_path(settings)
     atomic_write(path, render_nsd(settings, zone_names))
-    _reconfig(path)
     return path
-
-
-def _reconfig(path: Path) -> None:
-    try:
-        subprocess.run(
-            ["nsd-control", "-c", str(path), "reconfig"],
-            check=False,
-            timeout=5,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return
 
 
 def ensure_control_keys(directory: Path) -> None:

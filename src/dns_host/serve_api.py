@@ -11,6 +11,7 @@ def main() -> None:
     settings = Settings.load()
     settings.require_service_ns()
     log_effective(settings)
+    workers = os.environ.get("GUNICORN_WORKERS", "").strip() or str(settings.gunicorn_workers)
     os.execvp(
         "gunicorn",
         [
@@ -20,7 +21,7 @@ def main() -> None:
             "--bind",
             settings.gunicorn_bind,
             "--workers",
-            str(settings.gunicorn_workers),
+            workers,
             "--timeout",
             "60",
             "dns_host.wsgi:app",

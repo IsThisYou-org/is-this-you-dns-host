@@ -1,7 +1,10 @@
 # busybox init. One respawn entry per daemon so a dead process is restarted.
 ::respawn:/usr/local/bin/start_syslog
 ::respawn:/usr/local/bin/start_api
-::respawn:/usr/local/bin/start_dns
+::respawn:/usr/local/bin/start_controller
+::respawn:/usr/local/bin/start_dns_udp
+::respawn:/usr/local/bin/start_dns_axfr
 ::respawn:/usr/local/bin/start_nsd
 ::respawn:/usr/local/bin/start_nginx
+::respawn:/usr/local/bin/start_cron
 ::shutdown:/usr/local/bin/start_shutdown

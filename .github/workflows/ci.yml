@@ -82,7 +82,7 @@ jobs:
           else:
               raise SystemExit(f"NSD did not serve catalog SOA: {last}")
           PY
-          docker exec dns-host-ci sh -c 'ps w | grep -E "[n]ginx|[n]sd|[g]unicorn|[s]yslogd"'
+          docker exec dns-host-ci sh -c 'ps w | grep -E "[n]ginx|[n]sd|[g]unicorn|[s]yslogd|[c]ontroller|[u]dp_service|[a]xfr_service|[c]rond"'
           readonly=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' dns-host-ci)
           test "$readonly" = "true"
           diff=$(docker diff dns-host-ci || true)

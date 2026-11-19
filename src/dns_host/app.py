@@ -47,7 +47,11 @@ def create_app(settings: Settings | None = None, lookup=None, store: Store | Non
 
     @app.get("/health")
     def health():
-        serial = store.catalog_serial()
+        from dns_host.catalogfile import Catalog
+
+        catalog = Catalog(settings)
+        catalog.load()
+        serial = catalog.serial or store.catalog_serial()
         body = {
             "status": "ok",
             "catalogZone": settings.catalog_zone.to_text(),
@@ -150,9 +154,12 @@ def create_app(settings: Settings | None = None, lookup=None, store: Store | Non
         reason = str(body.get("reason") or "dropped")
         if not isinstance(apexes, list) or not apexes:
             return jsonify(error="bad_request", message="apexes must be a non-empty list"), 400
+        from dns_host.controller import Controller
+
+        controller = Controller(settings, store, notifier)
         dropped = []
         for apex in apexes:
-            serial = store.delete_zone(str(apex), settings.now())
+            serial = controller.remove(str(apex), settings.now())
             if serial is None:
                 continue
             store.incr("zones_dropped")

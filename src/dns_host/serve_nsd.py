@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import pwd
-import time
 from pathlib import Path
 
 from dns_host.config import Settings, log_effective
@@ -35,11 +34,8 @@ def main() -> None:
     (directory / "xfr").mkdir(parents=True, exist_ok=True)
     runtime = Path("/run/nsd")
     runtime.mkdir(parents=True, exist_ok=True)
-    deadline = time.time() + 30
-    while not path.is_file() and time.time() < deadline:
-        time.sleep(0.2)
-    if not path.is_file():
-        write_nsd_config(settings, [settings.catalog_zone.to_text()])
+    # Static config: only the catalog zone. Never rewritten when members change.
+    write_nsd_config(settings, [settings.catalog_zone.to_text()])
     ensure_control_keys(directory)
     _chown_tree(directory, "nsd")
     _chown_tree(runtime, "nsd")

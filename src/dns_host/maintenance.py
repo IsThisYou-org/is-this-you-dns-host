@@ -85,7 +85,9 @@ class Maintenance:
             self._drop(row.apex, now, "parent drift grace elapsed")
 
     def _drop(self, apex: str, now: int, reason: str) -> None:
-        serial = self.store.delete_zone(apex, now)
+        from dns_host.controller import Controller
+
+        serial = Controller(self.settings, self.store).remove(apex, now)
         if serial is None:
             return
         self.store.incr("zones_dropped")

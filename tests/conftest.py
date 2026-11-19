@@ -78,8 +78,13 @@ def post(env, body, apex=None, ip="203.0.113.10", raw=None, content_type="applic
     if apex is None:
         apex = str(body.get("apex", "user.example.")).rstrip(".")
     data = raw if raw is not None else __import__("json").dumps(body).encode()
-    return env.client.post(
+    response = env.client.post(
         f"/v1/zones/{apex}",
         data=data,
         headers={"Content-Type": content_type, "X-Real-IP": ip},
     )
+    if response.status_code in (200, 201):
+        from dns_host.controller import Controller
+
+        Controller(env.settings, env.store, notifier=env.notifier).run_once()
+    return response

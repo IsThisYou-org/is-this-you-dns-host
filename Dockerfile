@@ -25,11 +25,13 @@ COPY src ./src
 COPY deploy/root-anchors.ds ./deploy/root-anchors.ds
 COPY deploy/config.example.yaml /usr/local/share/dns-host/config.example.yaml
 COPY deploy/inittab /etc/inittab
+COPY deploy/crontabs/root /etc/crontabs/root
 COPY bin/ /usr/local/bin/
 RUN chmod 755 /usr/local/bin/start_up /usr/local/bin/start_syslog \
-        /usr/local/bin/start_api /usr/local/bin/start_dns \
+        /usr/local/bin/start_api /usr/local/bin/start_controller \
+        /usr/local/bin/start_dns_udp /usr/local/bin/start_dns_axfr \
         /usr/local/bin/start_nsd /usr/local/bin/start_nginx \
-        /usr/local/bin/start_shutdown
+        /usr/local/bin/start_cron /usr/local/bin/start_shutdown
 
 VOLUME ["/opt/data"]
 EXPOSE 80 53/tcp 53/udp

@@ -17,12 +17,16 @@ http_port: 80
 # Localhost only. nginx presents /int/ as /api/ here.
 internal_http_port: 8081
 gunicorn_bind: 127.0.0.1:8000
-gunicorn_workers: 2
+# Also overridable with the GUNICORN_WORKERS environment variable.
+gunicorn_workers: 3
+axfr_children: 5
+dnskey_cache_seconds: 3600
 
-# Hidden master. Not published.
+# Local SOA (UDP) and AXFR (TCP) share this port on 127.0.0.1.
+# They are separate processes. NSD on port 53 is the public server.
 dns_bind: 127.0.0.1
 dns_port: 5353
-# Public relay. NSD transfers from the master, then serves secondaries.
+# Public relay. NSD transfers only the catalog zone from 127.0.0.1:5353.
 nsd_bind: 0.0.0.0
 nsd_port: 53
 allow_localhost_xfr: true
