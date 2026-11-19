@@ -1,4 +1,13 @@
-"""Gunicorn logging. The start script waits until /dev/log exists."""
+"""Gunicorn logging and the control socket.
+
+Alpine 3.24 ships gunicorn 25.2, which opens a control socket. The default
+path is ``$XDG_RUNTIME_DIR/gunicorn.ctl`` or ``$HOME/.gunicorn/gunicorn.ctl``.
+``/run`` is a symlink to ``/dev/shm``, so the socket stays on that tmpfs
+when the root filesystem is read-only. The setting name is ``control_socket``
+(command line ``--control-socket``), added in gunicorn 25.1.
+"""
+
+control_socket = "/run/gunicorn.ctl"
 
 logconfig_dict = {
     "version": 1,

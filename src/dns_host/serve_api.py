@@ -18,6 +18,8 @@ def main() -> None:
             "gunicorn",
             "-c",
             "/app/gunicorn.conf.py",
+            "--control-socket",
+            "/run/gunicorn.ctl",
             "--bind",
             settings.gunicorn_bind,
             "--workers",

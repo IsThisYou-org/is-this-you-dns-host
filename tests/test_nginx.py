@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from dns_host.render_nginx import render
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_nginx_is_plain_http_and_trusts_only_configured_proxies():
@@ -17,6 +21,22 @@ def test_nginx_is_plain_http_and_trusts_only_configured_proxies():
     assert "pid /run/nginx.pid;" in text
     assert "/tmp/nginx-body" in text
     assert "/opt/data" not in text
+
+
+def test_read_only_root_uses_dev_shm_and_an_explicit_gunicorn_socket():
+    dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "rm -rf /run /tmp" in dockerfile
+    assert "ln -s /dev/shm /run" in dockerfile
+    assert "ln -s /dev/shm /tmp" in dockerfile
+    gunicorn_conf = (_ROOT / "gunicorn.conf.py").read_text(encoding="utf-8")
+    assert 'control_socket = "/run/gunicorn.ctl"' in gunicorn_conf
+    launch = (_ROOT / "src/dns_host/serve_api.py").read_text(encoding="utf-8")
+    assert '"--control-socket"' in launch
+    assert '"/run/gunicorn.ctl"' in launch
+    compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "read_only: true" in compose
+    assert "shm_size:" in compose
+    assert "tmpfs:" not in compose
 
 
 def test_nginx_without_trusted_proxies_does_not_rewrite_addresses():

@@ -8,7 +8,7 @@ This repository is MIT licensed.
 
 ## Run it
 
-The image is Alpine 3.24. The container root is read-only. Persistent data is the `/opt/data` volume. `/run` and `/tmp` are tmpfs. Copy the example config if you want different nameservers; Compose bind-mounts it at `/opt/data/etc/config.yaml`.
+The image is Alpine 3.24. Compose sets `read_only: true`. Persistent data is the `/opt/data` volume. `/run` and `/tmp` are symlinks to `/dev/shm`, and `shm_size` sizes that tmpfs. There are no other tmpfs mounts. Copy the example config if you want different nameservers; Compose bind-mounts it at `/opt/data/etc/config.yaml`.
 
 ```sh
 docker compose up --build
@@ -35,7 +35,7 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 
 Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
 
-NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx temp files are under `/tmp`. Nothing else is writable: `PYTHONDONTWRITEBYTECODE=1`, and pid, socket, and temp paths are `/run` or `/tmp`.
+NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx temp files are under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
 
 ### Layout
 
@@ -48,7 +48,7 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
-| `/run`, `/tmp` | tmpfs: pid files, the NSD control socket, nginx temp files |
+| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the NSD control socket, nginx temp files |
 
 ### HTTP
 

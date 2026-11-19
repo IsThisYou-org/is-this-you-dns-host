@@ -30,8 +30,7 @@ jobs:
           set -eu
           docker run -d --name dns-host-ci \
             --read-only \
-            --tmpfs /run \
-            --tmpfs /tmp \
+            --shm-size=64m \
             --cap-add NET_BIND_SERVICE \
             -v "$PWD/deploy/config.example.yaml:/opt/data/etc/config.yaml:ro" \
             -v dns-ci-data:/opt/data \
@@ -91,4 +90,6 @@ jobs:
             printf '%s\n' "$diff"
             exit 1
           fi
-          docker exec dns-host-ci sh -c 'test -f /opt/data/log/messages && test -d /opt/data/nsd && test -d /opt/data/zones && test -d /run && test -d /tmp'
+          docker exec dns-host-ci sh -c 'test "$(readlink /run)" = /dev/shm && test "$(readlink /tmp)" = /dev/shm'
+          docker exec dns-host-ci sh -c 'test -S /run/gunicorn.ctl && test -S /dev/shm/gunicorn.ctl'
+          docker exec dns-host-ci sh -c 'test -f /opt/data/log/messages && test -d /opt/data/nsd && test -d /opt/data/zones && test -d /run/nsd && test -d /tmp/nginx-body'

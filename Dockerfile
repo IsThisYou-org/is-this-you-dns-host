@@ -4,7 +4,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
     HOME=/tmp \
-    XDG_CACHE_HOME=/tmp
+    TMPDIR=/tmp \
+    XDG_CACHE_HOME=/tmp \
+    XDG_RUNTIME_DIR=/run
 
 RUN apk add --no-cache \
         python3 \
@@ -17,7 +19,10 @@ RUN apk add --no-cache \
         nsd \
         openssl \
     && rm -f /etc/nginx/http.d/default.conf /etc/nginx/conf.d/default.conf \
-    && mkdir -p /opt/data/log /opt/data/zones /opt/data/etc /opt/data/nsd/zones /opt/data/nsd/xfr /opt/data/secrets
+    && mkdir -p /opt/data/log /opt/data/zones /opt/data/etc /opt/data/nsd/zones /opt/data/nsd/xfr /opt/data/secrets \
+    && rm -rf /run /tmp \
+    && ln -s /dev/shm /run \
+    && ln -s /dev/shm /tmp
 
 WORKDIR /app
 COPY gunicorn.conf.py ./
