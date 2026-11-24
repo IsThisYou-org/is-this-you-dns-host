@@ -78,48 +78,58 @@ class Lab:
     def publish(self, *, ds="match", ns="match") -> None:
         self.responses.clear()
         ttl = 300
-        root_dnskey = dns.rrset.from_rdata(self.root, ttl, self.root_ksk, self.root_zsk)
-        root_dnskey_sig = self._sig(root_dnskey, self.root_ksk_priv, self.root_ksk, self.root)
-        root_ns = dns.rrset.from_text(self.root, ttl, "IN", "NS", *[name.to_text() for name in self.root_ns])
-        root_ns_sig = self._sig(root_ns, self.root_zsk_priv, self.root_zsk, self.root)
+        root_dnskey = dns.rrset.from_rdata(self.root, ttl, self.root_ksk,
+                                           self.root_zsk)
+        root_dnskey_sig = self._sig(root_dnskey, self.root_ksk_priv,
+                                    self.root_ksk, self.root)
+        root_ns = dns.rrset.from_text(
+            self.root, ttl, "IN", "NS",
+            *[name.to_text() for name in self.root_ns])
+        root_ns_sig = self._sig(root_ns, self.root_zsk_priv, self.root_zsk,
+                                self.root)
+        # Root DNSKEY and NS: rd=0 against the resolver's local root copy.
         self._put(self.root, "DNSKEY", None, root_dnskey, root_dnskey_sig)
         self._put(self.root, "NS", None, root_ns, root_ns_sig)
 
         parent_ds = dns.rrset.from_rdata(
-            self.parent, ttl, dns.dnssec.make_ds(self.parent, self.parent_ksk, "SHA256")
-        )
-        parent_ds_sig = self._sig(parent_ds, self.root_zsk_priv, self.root_zsk, self.root)
-        self._put(self.parent, "DS", self.root_ns[0], parent_ds, parent_ds_sig)
-        parent_ref = dns.rrset.from_text(
-            self.parent, ttl, "IN", "NS", *[name.to_text() for name in self.parent_ns]
-        )
-        self._put(self.parent, "NS", self.root_ns[0], parent_ref, None, section="authority")
+            self.parent, ttl,
+            dns.dnssec.make_ds(self.parent, self.parent_ksk, "SHA256"))
+        parent_ds_sig = self._sig(parent_ds, self.root_zsk_priv, self.root_zsk,
+                                  self.root)
+        # TLD DS lives in the root zone and is read at the root nameservers.
+        for server in self.root_ns:
+            self._put(self.parent, "DS", server, parent_ds, parent_ds_sig)
 
-        parent_dnskey = dns.rrset.from_rdata(self.parent, ttl, self.parent_ksk, self.parent_zsk)
-        parent_dnskey_sig = self._sig(parent_dnskey, self.parent_ksk_priv, self.parent_ksk, self.parent)
+        parent_dnskey = dns.rrset.from_rdata(self.parent, ttl, self.parent_ksk,
+                                             self.parent_zsk)
+        parent_dnskey_sig = self._sig(parent_dnskey, self.parent_ksk_priv,
+                                      self.parent_ksk, self.parent)
         parent_auth_ns = dns.rrset.from_text(
-            self.parent, ttl, "IN", "NS", *[name.to_text() for name in self.parent_ns]
-        )
-        parent_auth_sig = self._sig(parent_auth_ns, self.parent_zsk_priv, self.parent_zsk, self.parent)
-        for server in self.parent_ns:
-            self._put(self.parent, "DNSKEY", server, parent_dnskey, parent_dnskey_sig)
-            self._put(self.parent, "NS", server, parent_auth_ns, parent_auth_sig)
+            self.parent, ttl, "IN", "NS",
+            *[name.to_text() for name in self.parent_ns])
+        parent_auth_sig = self._sig(parent_auth_ns, self.parent_zsk_priv,
+                                    self.parent_zsk, self.parent)
+        # Below the root the walk recurses (rd=1) and does not pass server=.
+        self._put(self.parent, "DNSKEY", None, parent_dnskey,
+                  parent_dnskey_sig)
+        self._put(self.parent, "NS", None, parent_auth_ns, parent_auth_sig)
 
         if ds == "missing":
             self._put_missing_ds()
         elif ds == "mismatch":
             _priv, other = generate_key(257)
-            wrong = dns.rrset.from_rdata(self.apex, ttl, dns.dnssec.make_ds(self.apex, other, "SHA256"))
-            wrong_sig = self._sig(wrong, self.parent_zsk_priv, self.parent_zsk, self.parent)
-            for server in self.parent_ns:
-                self._put(self.apex, "DS", server, wrong, wrong_sig)
+            wrong = dns.rrset.from_rdata(
+                self.apex, ttl, dns.dnssec.make_ds(self.apex, other, "SHA256"))
+            wrong_sig = self._sig(wrong, self.parent_zsk_priv, self.parent_zsk,
+                                  self.parent)
+            self._put(self.apex, "DS", None, wrong, wrong_sig)
         else:
             child_ds = dns.rrset.from_rdata(
-                self.apex, ttl, dns.dnssec.make_ds(self.apex, self.child_ksk, "SHA256")
-            )
-            child_ds_sig = self._sig(child_ds, self.parent_zsk_priv, self.parent_zsk, self.parent)
-            for server in self.parent_ns:
-                self._put(self.apex, "DS", server, child_ds, child_ds_sig)
+                self.apex, ttl,
+                dns.dnssec.make_ds(self.apex, self.child_ksk, "SHA256"))
+            child_ds_sig = self._sig(child_ds, self.parent_zsk_priv,
+                                     self.parent_zsk, self.parent)
+            self._put(self.apex, "DS", None, child_ds, child_ds_sig)
 
         if ns == "incomplete":
             targets = [self.service_ns[0]]
@@ -127,28 +137,37 @@ class Lab:
             targets = self.service_ns + [_abs("ns.other.example.")]
         else:
             targets = list(self.service_ns)
-        referral = dns.rrset.from_text(self.apex, ttl, "IN", "NS", *[name.to_text() for name in targets])
-        for server in self.parent_ns:
-            self._put(self.apex, "NS", server, referral, None, section="authority")
+        referral = dns.rrset.from_text(self.apex, ttl, "IN", "NS",
+                                       *[name.to_text() for name in targets])
+        self._put(self.apex, "NS", None, referral, None, section="authority")
 
     def _put_missing_ds(self) -> None:
         ttl = 300
-        nsec = dns.rrset.from_text(self.apex, ttl, "IN", "NSEC", f"zzzz.{self.parent.to_text()} NS")
-        nsec_sig = self._sig(nsec, self.parent_zsk_priv, self.parent_zsk, self.parent)
+        nsec = dns.rrset.from_text(self.apex, ttl, "IN", "NSEC",
+                                   f"zzzz.{self.parent.to_text()} NS")
+        nsec_sig = self._sig(nsec, self.parent_zsk_priv, self.parent_zsk,
+                             self.parent)
         referral = dns.rrset.from_text(
-            self.apex, ttl, "IN", "NS", *[name.to_text() for name in self.service_ns]
-        )
-        for server in self.parent_ns:
-            items = _pack(nsec, nsec_sig) + _pack(referral)
-            self.responses[_key(self.apex, "DS", server)] = LookupResponse(
-                status=0, authority=items, aa=False
-            )
+            self.apex, ttl, "IN", "NS",
+            *[name.to_text() for name in self.service_ns])
+        items = _pack(nsec, nsec_sig) + _pack(referral)
+        self.responses[_key(self.apex, "DS",
+                            None)] = LookupResponse(status=0,
+                                                    authority=items,
+                                                    aa=False)
 
     def _sig(self, rrset, private, dnskey, signer):
-        signature = sign_rrset(rrset, private, dnskey, signer, self.inception, self.expiration)
+        signature = sign_rrset(rrset, private, dnskey, signer, self.inception,
+                               self.expiration)
         return dns.rrset.from_rdata(rrset.name, rrset.ttl, signature)
 
-    def _put(self, name, rdtype, server, rrset, sigs, section="answer") -> None:
+    def _put(self,
+             name,
+             rdtype,
+             server,
+             rrset,
+             sigs,
+             section="answer") -> None:
         items = _pack(rrset, sigs)
         response = LookupResponse(status=0, aa=sigs is not None)
         if section == "answer":
@@ -191,8 +210,10 @@ class Lab:
             extras=kwargs.get(
                 "extras",
                 [
-                    (f"_auth.7e9a2f4c8b1d.{self.apex.to_text()}", "TXT", ['"v=dnsauth1 alg=ES256 k=example"']),
-                    (self.apex.to_text(), "URI", ['10 1 "https://example.org/j"']),
+                    (f"_auth.7e9a2f4c8b1d.{self.apex.to_text()}", "TXT",
+                     ['"v=dnsauth1 alg=ES256 k=example"']),
+                    (self.apex.to_text(), "URI",
+                     ['10 1 "https://example.org/j"']),
                 ],
             ),
             nsec3=kwargs.get("nsec3", True),

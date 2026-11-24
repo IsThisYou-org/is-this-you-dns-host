@@ -15,6 +15,9 @@ service_ns:
 
 catalog_zone: catalog.example.net.
 catalog_rname: hostmaster.example.net.
+# Base URL of a JSON DoH API. The client sends Accept: application/dns-json
+# and the parameters name, type, do, rd, cd, and server. This must be that
+# JSON API, not a binary DoH endpoint (application/dns-message).
 resolver_base_url: https://api.isthisyou.org/
 
 # Public HTTP is port 80. nginx's localhost listener is 127.0.0.1:8081.
