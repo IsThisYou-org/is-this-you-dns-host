@@ -36,7 +36,7 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 
 Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
 
-NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx temp files are under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
+NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx writes its generated config to `/run/nginx/nginx.conf` (rewritten at every start) and its temp files under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
 
 ### Layout
 
@@ -49,7 +49,7 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
-| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
+| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the generated nginx config (`/run/nginx/nginx.conf`), nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
 
 ### HTTP
 
@@ -73,6 +73,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 | --- | --- | --- |
 | `service_ns` | unset; the process refuses to start | Public nameservers. All of them must appear in the apex NS and in the parent delegation. |
 | `secondaries` | empty | IP, optional port, optional TSIG. NSD `provide-xfr` and `notify` are generated from this list. |
+| `axfr_allow` | empty | Extra CIDRs allowed to AXFR from NSD, for debugging. A bare address is a /32 or /128. `notify` is still generated only from `secondaries`. |
 | `resolver_base_url` | `https://api.isthisyou.org/` | Base URL of a JSON DoH API (`Accept: application/dns-json`). Not a binary DoH endpoint (`application/dns-message`). |
 | `catalog_zone` | `catalog.example.net.` | Catalog zone apex (RFC 9432). |
 | `trusted_proxies` | empty | CIDRs allowed to supply `X-Forwarded-For` / `X-Forwarded-Proto` on the external listener. |
@@ -84,7 +85,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 
 The example file lists the rate limits, the serial window, and the DS digest list. `handshake_root_servers` and `handshake_trust_anchor_file` together enable a second walk when the name is proved absent from the ICANN root.
 
-Secondaries are one list. Each entry is an IP, an optional port, and an optional TSIG key name, secret (or `tsig_secret_file`), and algorithm. The generated NSD pattern emits `provide-xfr` and `notify` for those addresses only.
+Secondaries are one list. Each entry is an IP, an optional port, and an optional TSIG key name, secret (or `tsig_secret_file`), and algorithm. The generated NSD pattern emits `provide-xfr` and `notify` for those addresses. `axfr_allow` adds `provide-xfr` lines with `NOKEY` for each subnet, on the catalog zone and on the member pattern. Those subnets are not NOTIFY targets. A value that is not an IPv4 or IPv6 CIDR stops the process at startup.
 
 ## Try an upload
 
@@ -163,7 +164,7 @@ On success the API writes wire-format AXFR data into the spool (an empty `mktemp
 
 ## Secondaries
 
-NOTIFY is UDP, from the UDP service: the catalog first when its serial changes, then each new or updated member. NSD's `provide-xfr` and `notify` lines are generated from the one secondary list, on the catalog zone and on the member pattern. NSD itself requests only AXFR (`request-xfr: AXFR`) from `127.0.0.1:5353`. Public AXFR is answered by NSD, not by the hidden TCP service. A bad TSIG on NSD's side is refused. TSIG is configured on each secondary (key name, secret or `tsig_secret_file`, and algorithm). There is no global TSIG key.
+NOTIFY is UDP, from the UDP service: the catalog first when its serial changes, then each new or updated member. NSD's `notify` lines are generated from the secondary list. `provide-xfr` lines are generated from that list and from `axfr_allow`, on the catalog zone and on the member pattern. NSD itself requests only AXFR (`request-xfr: AXFR`) from `127.0.0.1:5353`. Public AXFR is answered by NSD, not by the hidden TCP service. A bad TSIG on NSD's side is refused. TSIG is configured on each secondary (key name, secret or `tsig_secret_file`, and algorithm). There is no global TSIG key. `axfr_allow` entries use `NOKEY`.
 
 The catalog is schema version 2 (`version.<catalog> TXT "2"`, member PTRs at `<label>.zones.<catalog>`). It is not signed. The tests speak AXFR with dnspython. NSD on port 53 is what a real secondary talks to.
 

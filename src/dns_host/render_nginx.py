@@ -7,8 +7,9 @@ This process does not terminate TLS. A trusted reverse proxy may send
 those headers only on the external listener, and only when the immediate peer
 is in ``trusted_proxies``.
 
-Runtime files stay on tmpfs (``/run``, ``/tmp``). The generated config itself
-is written under ``/opt/data``.
+Runtime files stay on tmpfs (``/run``, ``/tmp``). ``serve_nginx`` rewrites
+this config to ``/run/nginx/nginx.conf`` at every start. ``/run`` is a
+symlink to ``/dev/shm``.
 """
 
 from __future__ import annotations

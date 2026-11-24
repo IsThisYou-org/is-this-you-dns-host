@@ -10,6 +10,7 @@ resolver_base_url: https://api.isthisyou.org/
 gunicorn_workers: 2
 
 secondaries: []
+axfr_allow: []
 
 trusted_proxies:
   - 172.28.9.0/24

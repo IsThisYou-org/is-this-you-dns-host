@@ -2,7 +2,9 @@
 
 A missing file is empty configuration and the defaults below apply. The
 process refuses to start when ``service_ns`` is unset. ``log_level``
-defaults to ``info`` and must be a syslog severity name. Tests construct
+defaults to ``info`` and must be a syslog severity name. ``axfr_allow``
+defaults to empty; each entry is an IPv4 or IPv6 CIDR (a bare address is a
+/32 or /128) and a bad entry stops the process at startup. Tests construct
 ``Settings`` directly. TSIG secrets may be inline or read from a file; they
 are never taken from a zone upload.
 """
@@ -70,6 +72,71 @@ def parse_trusted_proxies(raw: str) -> list[str]:
             continue
         out.append(str(ipaddress.ip_network(part, strict=False)))
     return out
+
+
+def parse_axfr_allow(value) -> list[str]:
+    """Return canonical CIDRs. A bare address is a /32 or /128.
+
+    A missing value is an empty list. Host bits in a prefix are masked.
+    Anything that is not an IPv4 or IPv6 network raises ``SystemExit``.
+    """
+
+    if value is None or value == "" or value == []:
+        return []
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise SystemExit(
+            f"invalid axfr_allow: expected a list of CIDRs, got {value!r}")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, str):
+            raise SystemExit(
+                f"invalid axfr_allow {item!r}: expected an IPv4 or IPv6 CIDR "
+                "(a bare address is a /32 or /128)")
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            network = ipaddress.ip_network(text, strict=False)
+        except ValueError as exc:
+            raise SystemExit(
+                f"invalid axfr_allow {text!r}: expected an IPv4 or IPv6 CIDR "
+                "(a bare address is a /32 or /128)") from exc
+        canonical = str(network)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
+
+
+class AxfrAllow:
+    """Secondary hosts and ``axfr_allow`` networks that may AXFR.
+
+    Membership is subnet-aware. An address matches when it is a secondary
+    host or it falls inside an ``axfr_allow`` network. Iteration yields
+    canonical CIDR strings, secondaries first.
+    """
+
+    def __init__(self, networks: list) -> None:
+        self._networks = list(networks)
+
+    def __contains__(self, item: object) -> bool:
+        try:
+            address = ipaddress.ip_address(str(item).strip())
+        except (TypeError, ValueError):
+            return False
+        return any(address in network for network in self._networks)
+
+    def __iter__(self):
+        return (str(network) for network in self._networks)
+
+    def __len__(self) -> int:
+        return len(self._networks)
 
 
 @dataclass
@@ -165,6 +232,7 @@ def load_ds_anchors(path: Path) -> list:
 class Settings:
     service_ns: list = field(default_factory=list)
     secondaries: list = field(default_factory=list)
+    axfr_allow: list = field(default_factory=list)
     resolver_base_url: str = "https://api.isthisyou.org/"
     catalog_zone: object = None
     catalog_rname: object = None
@@ -217,6 +285,7 @@ class Settings:
             raise SystemExit(str(exc)) from exc
         self.log_level = canonical
         set_log_level(canonical)
+        self.axfr_allow = parse_axfr_allow(self.axfr_allow)
 
     def now(self) -> int:
         return int(self.now_fn())
@@ -240,8 +309,24 @@ class Settings:
         return data_dir() / "host.db"
 
     @property
-    def allowed_axfr_ips(self) -> set[str]:
-        return {host for host, _port in self.secondaries}
+    def allowed_axfr_ips(self) -> AxfrAllow:
+        """Secondary hosts plus ``axfr_allow`` networks. Membership tests subnets."""
+
+        networks = []
+        seen = set()
+        for host, _port in self.secondaries:
+            network = ipaddress.ip_network(str(host), strict=False)
+            if network in seen:
+                continue
+            seen.add(network)
+            networks.append(network)
+        for item in self.axfr_allow:
+            network = ipaddress.ip_network(str(item), strict=False)
+            if network in seen:
+                continue
+            seen.add(network)
+            networks.append(network)
+        return AxfrAllow(networks)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
@@ -290,6 +375,7 @@ class Settings:
         return cls(
             service_ns=service_ns,
             secondaries=_secondaries_value(raw.get("secondaries", [])),
+            axfr_allow=raw.get("axfr_allow", []),
             resolver_base_url=str(
                 raw.get("resolver_base_url") or "https://api.isthisyou.org/"),
             catalog_zone=catalog,
@@ -481,6 +567,7 @@ def log_effective(settings: Settings) -> None:
         catalog_zone=settings.catalog_zone.to_text()
         if settings.catalog_zone is not None else "",
         secondaries=secondaries,
+        axfr_allow=list(settings.axfr_allow),
         grace_days=settings.grace_days,
         dns_bind=DNS_BIND,
         dns_port=DNS_PORT,

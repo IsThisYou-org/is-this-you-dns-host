@@ -14,6 +14,7 @@ mkdir -p \
   /opt/data/nsd/xfr \
   /opt/data/secrets \
   /run/nsd \
+  /run/nginx \
   /tmp/nginx-body \
   /tmp/nginx-proxy \
   /tmp/nginx-fastcgi \

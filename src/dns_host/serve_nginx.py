@@ -1,12 +1,20 @@
-"""Write nginx.conf under /opt/data and exec nginx in the foreground."""
+"""Write nginx.conf on tmpfs and exec nginx in the foreground.
+
+The file is regenerated at every start. The path is fixed at
+``/run/nginx/nginx.conf``. ``/run`` is a symlink to ``/dev/shm``.
+"""
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from dns_host.config import Settings, data_dir, log_effective
+from dns_host.config import Settings, log_effective
 from dns_host.render_nginx import render
 from dns_host.zonesync import atomic_write
+
+# Regenerated every start. /run is the /dev/shm tmpfs.
+NGINX_CONF = Path("/run/nginx/nginx.conf")
 
 
 def main() -> None:
@@ -17,11 +25,11 @@ def main() -> None:
         settings.max_body_bytes,
         list(settings.trusted_proxies),
     )
-    path = data_dir() / "etc" / "nginx.conf"
-    atomic_write(path, text)
+    NGINX_CONF.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(NGINX_CONF, text)
     os.execvp("nginx", [
         "nginx", "-e", "/tmp/nginx-startup.log", "-c",
-        str(path), "-g", "daemon off;"
+        str(NGINX_CONF), "-g", "daemon off;"
     ])
 
 
