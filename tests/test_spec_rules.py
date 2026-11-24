@@ -1,11 +1,24 @@
 """Spec rules that the original suite did not cover."""
 
 import json
+from pathlib import Path
 
 import dns.name
 import pytest
 
-from dns_host.config import DNS_BIND, DNS_PORT, Secondary, Settings
+from dns_host.config import (
+    DNS_BIND,
+    DNS_PORT,
+    GUNICORN_BIND,
+    HTTP_PORT,
+    INTERNAL_HTTP_PORT,
+    NSD_BIND,
+    NSD_PORT,
+    TRUST_ANCHOR_FILE,
+    Secondary,
+    Settings,
+    data_dir,
+)
 from dns_host.dns_server import DnsServer
 from dns_host.nsdconf import render_nsd
 from dns_host.zonesign import generate_key
@@ -18,11 +31,26 @@ def test_default_resolver_and_ports():
     assert settings.resolver_base_url == "https://api.isthisyou.org/"
     assert DNS_BIND == "127.0.0.1"
     assert DNS_PORT == 5353
+    assert INTERNAL_HTTP_PORT == 8081
+    assert GUNICORN_BIND == "127.0.0.1:8000"
+    assert HTTP_PORT == 80
+    assert NSD_BIND == "0.0.0.0"
+    assert NSD_PORT == 53
+    assert TRUST_ANCHOR_FILE == Path("/app/deploy/root-anchors.ds")
     assert not hasattr(settings, "dns_bind")
     assert not hasattr(settings, "dns_port")
     assert not hasattr(settings, "allow_localhost_xfr")
-    assert settings.nsd_port == 53
-    assert settings.http_port == 80
+    assert not hasattr(settings, "internal_http_port")
+    assert not hasattr(settings, "gunicorn_bind")
+    assert not hasattr(settings, "http_port")
+    assert not hasattr(settings, "nsd_bind")
+    assert not hasattr(settings, "nsd_port")
+    assert not hasattr(settings, "data_dir")
+    assert not hasattr(settings, "manage_nsd")
+    assert not hasattr(settings, "axfr_require_tsig")
+    assert not hasattr(settings, "tsig_key_name")
+    assert not hasattr(settings, "tsig_secret")
+    assert not hasattr(settings, "tsig_algo")
     assert "web3dns.net" not in settings.resolver_base_url
 
 
@@ -97,7 +125,6 @@ def test_provide_xfr_and_notify_come_from_one_secondary_list():
                       tsig_secret="c2VjcmV0MQ=="),
             Secondary("192.0.2.11", 5353),
         ],
-        nsd_port=53,
         catalog_zone=dns.name.from_text("catalog.example.net."),
     )
     upload = {
@@ -140,7 +167,7 @@ def test_internal_drop_updates_the_catalogue(env):
     assert env.store.get_zone("user.example.") is None
     assert env.notifier.zones == ["catalog.svc.test."]
     catalogue = json.loads(
-        (env.settings.data_dir / "catalog" / "catalog.json").read_text())
+        (data_dir() / "catalog" / "catalog.json").read_text())
     assert catalogue["zones"] == []
 
 
@@ -151,7 +178,7 @@ def test_dns_serves_the_catalogue_file(env):
     try:
         assert any(rdtype == "SOA" for _name, rdtype, _text in _records(
             _xfr(server.port, "user.example.")))
-        path = env.settings.data_dir / "catalog" / "catalog.json"
+        path = data_dir() / "catalog" / "catalog.json"
         data = json.loads(path.read_text())
         data["zones"] = []
         path.write_text(json.dumps(data))

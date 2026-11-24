@@ -43,7 +43,8 @@ def write_member(directory: Path, apex: str, document: dict) -> None:
     )
 
 
-def write_catalogue(directory: Path, catalog_serial: int, zones: list[dict]) -> None:
+def write_catalogue(directory: Path, catalog_serial: int,
+                    zones: list[dict]) -> None:
     payload = {
         "catalog_serial": int(catalog_serial),
         "zones": sorted(zones, key=lambda item: item["apex"]),
@@ -84,24 +85,31 @@ class ZoneIndex:
             return False
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            serials = {item["apex"]: int(item["serial"]) for item in data.get("zones", [])}
+            serials = {
+                item["apex"]: int(item["serial"])
+                for item in data.get("zones", [])
+            }
             zones = {}
             for apex, serial in serials.items():
                 if self.serials.get(apex) == serial and apex in self.zones:
                     zones[apex] = self.zones[apex]
                     continue
-                document = json.loads((self.directory / zone_filename(apex)).read_text(encoding="utf-8"))
-                zones[apex] = document_to_zone(dns.name.from_text(apex), document)
+                document = json.loads(
+                    (self.directory /
+                     zone_filename(apex)).read_text(encoding="utf-8"))
+                zones[apex] = document_to_zone(dns.name.from_text(apex),
+                                               document)
         except Exception:
             # Leave the previous snapshot in place and retry on the next poll.
             return False
-        changed = serials != self.serials or int(data.get("catalog_serial") or 0) != self.catalog_serial
+        changed = serials != self.serials or int(
+            data.get("catalog_serial") or 0) != self.catalog_serial
         self.zones = zones
         self.serials = serials
         self.catalog_serial = int(data.get("catalog_serial") or 0)
         self._mtime = mtime
         self.loaded = True
-        if changed and getattr(self.settings, "manage_nsd", False):
+        if changed:
             self.write_nsd()
         return True
 
@@ -111,7 +119,8 @@ class ZoneIndex:
     def write_nsd(self) -> None:
         from dns_host.nsdconf import write_nsd_config
 
-        write_nsd_config(self.settings, nsd_zone_names(self.settings, self.serials))
+        write_nsd_config(self.settings,
+                         nsd_zone_names(self.settings, self.serials))
 
 
 def nsd_zone_names(settings, serials: dict) -> list[str]:

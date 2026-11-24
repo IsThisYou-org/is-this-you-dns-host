@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dns_host.config import data_dir
 from dns_host.zonesync import atomic_write
 
 
@@ -38,7 +39,7 @@ class Catalog:
 
     @property
     def path(self) -> Path:
-        return Path(self.settings.data_dir) / "catalog" / "catalog.json"
+        return data_dir() / "catalog" / "catalog.json"
 
     @property
     def wire_path(self) -> Path:
@@ -79,18 +80,17 @@ class Catalog:
     def save(self, now: int) -> int:
         self.serial = next_catalog_serial(self.serial, now)
         payload = {
-            "serial": self.serial,
-            "zones": [
-                {
-                    "apex": member.apex,
-                    "serial": member.serial,
-                    "soa": member.soa,
-                    "ttl": member.ttl,
-                    "expires_at": member.expires_at,
-                    "parent_zone": member.parent_zone,
-                }
-                for member in sorted(self.zones.values(), key=lambda item: item.apex)
-            ],
+            "serial":
+            self.serial,
+            "zones": [{
+                "apex": member.apex,
+                "serial": member.serial,
+                "soa": member.soa,
+                "ttl": member.ttl,
+                "expires_at": member.expires_at,
+                "parent_zone": member.parent_zone,
+            } for member in sorted(self.zones.values(),
+                                   key=lambda item: item.apex)],
         }
         text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         atomic_write(self.path, text)
@@ -104,5 +104,7 @@ class Catalog:
     def snapshot(self) -> tuple:
         return (
             int(self.serial),
-            tuple(sorted((apex, int(member.serial)) for apex, member in self.zones.items())),
+            tuple(
+                sorted((apex, int(member.serial))
+                       for apex, member in self.zones.items())),
         )

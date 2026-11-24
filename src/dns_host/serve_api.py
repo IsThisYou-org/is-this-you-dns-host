@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import os
 
-from dns_host.config import Settings, log_effective
+from dns_host.config import GUNICORN_BIND, Settings, log_effective
 
 
 def main() -> None:
     settings = Settings.load()
     settings.require_service_ns()
     log_effective(settings)
-    workers = os.environ.get("GUNICORN_WORKERS", "").strip() or str(settings.gunicorn_workers)
+    workers = os.environ.get("GUNICORN_WORKERS", "").strip() or str(
+        settings.gunicorn_workers)
     os.execvp(
         "gunicorn",
         [
@@ -21,7 +22,7 @@ def main() -> None:
             "--control-socket",
             "/run/gunicorn.ctl",
             "--bind",
-            settings.gunicorn_bind,
+            GUNICORN_BIND,
             "--workers",
             workers,
             "--timeout",

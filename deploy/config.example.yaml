@@ -17,11 +17,10 @@ catalog_zone: catalog.example.net.
 catalog_rname: hostmaster.example.net.
 resolver_base_url: https://api.isthisyou.org/
 
-# Public HTTP (plain). TLS terminates in front of the container.
-http_port: 80
-# Localhost only. nginx presents /int/ as /api/ here.
-internal_http_port: 8081
-gunicorn_bind: 127.0.0.1:8000
+# Public HTTP is port 80. nginx's localhost listener is 127.0.0.1:8081.
+# gunicorn listens on 127.0.0.1:8000. NSD listens on 0.0.0.0 port 53.
+# Those addresses are fixed. Data is /opt/data. The ICANN trust-anchor
+# file is /app/deploy/root-anchors.ds. Those paths are fixed.
 # Also overridable with the GUNICORN_WORKERS environment variable.
 gunicorn_workers: 3
 axfr_children: 5
@@ -31,8 +30,6 @@ dnskey_cache_seconds: 3600
 # That address is fixed. Localhost AXFR is always allowed.
 # NSD on port 53 is the public server and transfers only the catalog
 # zone from 127.0.0.1:5353.
-nsd_bind: 0.0.0.0
-nsd_port: 53
 
 # One list. provide-xfr and notify are generated from these entries.
 # secondaries:
@@ -47,7 +44,6 @@ secondaries: []
 # The easy-nginx overlay uses 172.28.9.0/24.
 trusted_proxies: []
 
-trust_anchor_file: /app/deploy/root-anchors.ds
 grace_days: 90
 max_body_bytes: 1048576
 max_rrsets: 2000
@@ -60,4 +56,3 @@ parent_query_window_seconds: 60
 ds_digest_types:
   - 2
 health_check_dns: true
-data_dir: /opt/data
