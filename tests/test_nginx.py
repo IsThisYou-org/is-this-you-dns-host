@@ -6,7 +6,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_nginx_is_plain_http_and_trusts_only_configured_proxies():
-    text = render(80, 1048576, ["172.28.9.0/24", "10.1.2.3/32"], internal_port=8081)
+    text = render(80,
+                  1048576, ["172.28.9.0/24", "10.1.2.3/32"],
+                  internal_port=8081)
     assert "listen 80;" in text
     assert "listen 127.0.0.1:8081;" in text
     assert "user nginx;" in text
@@ -16,6 +18,8 @@ def test_nginx_is_plain_http_and_trusts_only_configured_proxies():
     assert "set_real_ip_from 10.1.2.3/32;" in text
     assert "real_ip_header X-Forwarded-For;" in text
     assert "X-Forwarded-Proto $forwarded_proto;" in text
+    assert "location = /config {" in text
+    assert "proxy_pass http://127.0.0.1:8000/ext/config;" in text
     assert "proxy_pass http://127.0.0.1:8000/ext/;" in text
     assert "proxy_pass http://127.0.0.1:8000/int/;" in text
     assert "pid /run/nginx.pid;" in text

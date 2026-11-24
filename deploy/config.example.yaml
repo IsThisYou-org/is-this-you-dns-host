@@ -22,14 +22,12 @@ gunicorn_workers: 3
 axfr_children: 5
 dnskey_cache_seconds: 3600
 
-# Local SOA (UDP) and AXFR (TCP) share this port on 127.0.0.1.
-# They are separate processes. NSD on port 53 is the public server.
-dns_bind: 127.0.0.1
-dns_port: 5353
-# Public relay. NSD transfers only the catalog zone from 127.0.0.1:5353.
+# Internal SOA (UDP) and AXFR (TCP) listen on 127.0.0.1 port 5353.
+# That address is fixed. Localhost AXFR is always allowed.
+# NSD on port 53 is the public server and transfers only the catalog
+# zone from 127.0.0.1:5353.
 nsd_bind: 0.0.0.0
 nsd_port: 53
-allow_localhost_xfr: true
 
 # One list. provide-xfr and notify are generated from these entries.
 # secondaries:

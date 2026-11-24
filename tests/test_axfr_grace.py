@@ -25,7 +25,9 @@ def _records(messages):
     for message in messages:
         for rrset in message.answer:
             for rdata in rrset:
-                found.append((rrset.name.to_text(), dns.rdatatype.to_text(rrset.rdtype), rdata.to_text()))
+                found.append(
+                    (rrset.name.to_text(), dns.rdatatype.to_text(rrset.rdtype),
+                     rdata.to_text()))
     return found
 
 
@@ -39,8 +41,10 @@ def test_axfr_allow_deny_and_catalog_member(env):
         assert any(rdtype == "SOA" for _name, rdtype, _text in member)
         assert any(rdtype == "TXT" for _name, rdtype, _text in member)
         catalog = _records(_xfr(port, "catalog.svc.test."))
-        assert any(rdtype == "TXT" and text.strip('"') == "2" for _name, rdtype, text in catalog)
-        assert any(rdtype == "PTR" and text == "user.example." for _name, rdtype, text in catalog)
+        assert any(rdtype == "TXT" and text.strip('"') == "2"
+                   for _name, rdtype, text in catalog)
+        assert any(rdtype == "PTR" and text == "user.example."
+                   for _name, rdtype, text in catalog)
 
         query = dns.message.make_query("user.example.", "IXFR")
         ixfr = dns.query.tcp(query, "127.0.0.1", port=port, timeout=2)
@@ -61,20 +65,23 @@ def test_rrsig_expiry_keeps_zone_until_grace_ends(env):
     body = env.lab.zone(expiration=env.clock.t + 100)
     assert post(env, body).status_code == 201
     server = DnsServer(env.settings, env.store)
-    server.start()
-    maintenance = Maintenance(env.settings, env.store, lookup=env.lab, notifier=env.notifier)
+    port = server.start()
+    maintenance = Maintenance(env.settings,
+                              env.store,
+                              lookup=env.lab,
+                              notifier=env.notifier)
     try:
         env.clock.t += 150
         maintenance.run_once()
         assert env.store.get_zone("user.example.") is not None
-        records = _records(_xfr(env.settings.dns_port, "user.example."))
+        records = _records(_xfr(port, "user.example."))
         assert any(rdtype == "SOA" for _name, rdtype, _text in records)
         env.clock.t = body_expiry(body) + env.settings.grace_seconds + 5
         env.notifier.zones.clear()
         maintenance.run_once()
         assert env.store.get_zone("user.example.") is None
         assert env.notifier.zones == ["catalog.svc.test."]
-        catalog = _records(_xfr(env.settings.dns_port, "catalog.svc.test."))
+        catalog = _records(_xfr(port, "catalog.svc.test."))
         assert not any(rdtype == "PTR" for _name, rdtype, _text in catalog)
     finally:
         server.stop()
@@ -90,7 +97,8 @@ def body_expiry(body) -> int:
         if item["type"] != "RRSIG":
             continue
         for text in item["rrdatas"]:
-            rdata = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.RRSIG, text)
+            rdata = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.RRSIG,
+                                        text)
             latest = max(latest, int(rdata.expiration))
     return latest
 
@@ -98,17 +106,21 @@ def body_expiry(body) -> int:
 def test_ds_withdraw_grace_then_restore_then_drop(env):
     assert post(env, env.lab.zone()).status_code == 201
     server = DnsServer(env.settings, env.store)
-    server.start()
-    maintenance = Maintenance(env.settings, env.store, lookup=env.lab, notifier=env.notifier)
+    port = server.start()
+    maintenance = Maintenance(env.settings,
+                              env.store,
+                              lookup=env.lab,
+                              notifier=env.notifier)
     try:
         env.lab.publish(ds="missing")
         denied = post(env, env.lab.zone(serial=env.clock.t + 1))
         assert denied.status_code == 403
         assert denied.get_json()["error"] == "parent_ds_missing"
-        assert _records(_xfr(env.settings.dns_port, "user.example."))
+        assert _records(_xfr(port, "user.example."))
         maintenance.run_once()
-        assert env.store.get_zone("user.example.").parent_drift_since == env.clock.t
-        assert _records(_xfr(env.settings.dns_port, "user.example."))
+        assert env.store.get_zone(
+            "user.example.").parent_drift_since == env.clock.t
+        assert _records(_xfr(port, "user.example."))
 
         env.clock.t += env.settings.negative_cache_ttl_seconds + 5
         env.lab.publish()
@@ -123,7 +135,8 @@ def test_ds_withdraw_grace_then_restore_then_drop(env):
         env.clock.t = drift + env.settings.grace_seconds + 10
         maintenance.run_once()
         assert env.store.get_zone("user.example.") is None
-        catalog = _records(_xfr(env.settings.dns_port, "catalog.svc.test."))
-        assert not any(text == "user.example." for _name, rdtype, text in catalog if rdtype == "PTR")
+        catalog = _records(_xfr(port, "catalog.svc.test."))
+        assert not any(text == "user.example."
+                       for _name, rdtype, text in catalog if rdtype == "PTR")
     finally:
         server.stop()

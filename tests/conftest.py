@@ -16,6 +16,7 @@ from tests.support import Lab
 
 
 class Clock:
+
     def __init__(self, start: int | None = None):
         self.t = int(start if start is not None else time.time())
 
@@ -42,11 +43,10 @@ def settings(tmp_path: Path, clock, lab):
         catalog_zone=normalise_name("catalog.svc.test."),
         catalog_rname=normalise_name("hostmaster.svc.test."),
         data_dir=tmp_path,
-        dns_port=0,
         trust_anchors=[lab.root_ds],
-        type_allowlist=frozenset(
-            item.strip().upper() for item in DEFAULT_TYPES.split(",") if item.strip()
-        ),
+        type_allowlist=frozenset(item.strip().upper()
+                                 for item in DEFAULT_TYPES.split(",")
+                                 if item.strip()),
         health_check_dns=False,
         now_fn=clock,
         rate_limit_requests=100,
@@ -74,14 +74,22 @@ def env(tmp_path, clock, lab, settings):
     )()
 
 
-def post(env, body, apex=None, ip="203.0.113.10", raw=None, content_type="application/json"):
+def post(env,
+         body,
+         apex=None,
+         ip="203.0.113.10",
+         raw=None,
+         content_type="application/json"):
     if apex is None:
         apex = str(body.get("apex", "user.example.")).rstrip(".")
     data = raw if raw is not None else __import__("json").dumps(body).encode()
     response = env.client.post(
         f"/v1/zones/{apex}",
         data=data,
-        headers={"Content-Type": content_type, "X-Real-IP": ip},
+        headers={
+            "Content-Type": content_type,
+            "X-Real-IP": ip
+        },
     )
     if response.status_code in (200, 201):
         from dns_host.controller import Controller

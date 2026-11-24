@@ -11,6 +11,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from dns_host.config import DNS_BIND, DNS_PORT
 from dns_host.zonesync import atomic_write
 
 
@@ -70,40 +71,35 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
         if not name or not secret or name in seen_keys:
             continue
         seen_keys.add(name)
-        lines.extend(
-            [
-                "key:",
-                f'    name: "{name}"',
-                f"    algorithm: {algo}",
-                f'    secret: "{secret}"',
-                "",
-            ]
-        )
+        lines.extend([
+            "key:",
+            f'    name: "{name}"',
+            f"    algorithm: {algo}",
+            f'    secret: "{secret}"',
+            "",
+        ])
     # One catalog zone. NSD creates member zones from it; nothing here is
     # rewritten when a user zone is added, and NSD is not reloaded.
-    # AXFR (not IXFR) from the local TCP service.
-    master = "AXFR " + _endpoint("127.0.0.1", int(settings.dns_port))
-    lines.extend(
-        [
-            "pattern:",
-            '    name: "catalog-member"',
-            f"    request-xfr: {master} NOKEY",
-            "    allow-notify: 127.0.0.1 NOKEY",
-        ]
-    )
+    # AXFR (not IXFR) from the fixed internal listener. That transfer is
+    # always allowed.
+    master = "AXFR " + _endpoint(DNS_BIND, DNS_PORT)
+    lines.extend([
+        "pattern:",
+        '    name: "catalog-member"',
+        f"    request-xfr: {master} NOKEY",
+        f"    allow-notify: {DNS_BIND} NOKEY",
+    ])
     _transfer_acl(lines, settings)
     catalog_name = settings.catalog_zone.to_text().rstrip(".")
-    lines.extend(
-        [
-            "",
-            "zone:",
-            f'    name: "{catalog_name}"',
-            f"    request-xfr: {master} NOKEY",
-            "    allow-notify: 127.0.0.1 NOKEY",
-            "    catalog: consumer",
-            '    catalog-member-pattern: "catalog-member"',
-        ]
-    )
+    lines.extend([
+        "",
+        "zone:",
+        f'    name: "{catalog_name}"',
+        f"    request-xfr: {master} NOKEY",
+        f"    allow-notify: {DNS_BIND} NOKEY",
+        "    catalog: consumer",
+        '    catalog-member-pattern: "catalog-member"',
+    ])
     _transfer_acl(lines, settings)
     lines.append("")
     # zone_names is intentionally unused: members come from the catalog zone.
@@ -130,7 +126,8 @@ def write_nsd_config(settings, zone_names: list[str] | None = None) -> Path:
 
 def ensure_control_keys(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
-    if (directory / "nsd_server.key").is_file() and (directory / "nsd_control.key").is_file():
+    if (directory / "nsd_server.key").is_file() and (
+            directory / "nsd_control.key").is_file():
         return
     setup = "/usr/sbin/nsd-control-setup"
     if not os.path.isfile(setup):

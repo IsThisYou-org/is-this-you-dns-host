@@ -21,8 +21,15 @@ import dns.rrset
 from dns_host.names import normalise_name
 from dns_host.rrtypes import DEFAULT_TYPES
 
-_REPO_ANCHORS = Path(__file__).resolve().parents[2] / "deploy" / "root-anchors.ds"
+_REPO_ANCHORS = Path(
+    __file__).resolve().parents[2] / "deploy" / "root-anchors.ds"
 CONFIG_PATH = Path("/opt/data/etc/config.yaml")
+
+# The internal DNS listener is not operator configuration. UDP (SOA and
+# NOTIFY) and TCP (AXFR) always bind here, and localhost AXFR is always
+# accepted.
+DNS_BIND = "127.0.0.1"
+DNS_PORT = 5353
 
 
 def _now() -> int:
@@ -108,7 +115,8 @@ def load_ds_anchors(path: Path) -> list:
     if not path.is_file():
         return []
     anchors = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.split(";", 1)[0].strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -121,11 +129,11 @@ def load_ds_anchors(path: Path) -> list:
                 continue
         else:
             marker = upper.index(" DS ")
-            rdata_text = stripped[marker + 4 :].strip()
+            rdata_text = stripped[marker + 4:].strip()
         try:
             anchors.append(
-                dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.DS, rdata_text)
-            )
+                dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.DS,
+                                    rdata_text))
         except Exception as exc:
             raise ValueError(f"{path}:{lineno}: {exc}") from exc
     return anchors
@@ -145,8 +153,6 @@ class Settings:
     gunicorn_workers: int = 3
     axfr_children: int = 5
     dnskey_cache_seconds: int = 3600
-    dns_bind: str = "127.0.0.1"
-    dns_port: int = 5353
     nsd_bind: str = "0.0.0.0"
     nsd_port: int = 53
     max_body_bytes: int = 1048576
@@ -167,7 +173,7 @@ class Settings:
     negative_cache_ttl_seconds: int = 60
     min_ttl: int = 30
     max_ttl: int = 86400
-    ds_digest_types: tuple = (2,)
+    ds_digest_types: tuple = (2, )
     apexes_per_parent_per_day: int = 0
     doh_timeout_seconds: float = 5.0
     doh_cd: int = 1
@@ -178,7 +184,6 @@ class Settings:
     tsig_secret: str = ""
     tsig_algo: str = "hmac-sha256"
     axfr_require_tsig: bool = False
-    allow_localhost_xfr: bool = True
     manage_nsd: bool = False
     maintenance_interval_seconds: int = 300
     soa_refresh: int = 3600
@@ -244,23 +249,28 @@ class Settings:
         if rname_raw:
             rname = normalise_name(rname_raw, what="catalog rname")
         else:
-            rname = normalise_name("hostmaster." + catalog.to_text(), what="catalog rname")
+            rname = normalise_name("hostmaster." + catalog.to_text(),
+                                   what="catalog rname")
         anchor_path = Path(str(raw.get("trust_anchor_file") or _REPO_ANCHORS))
         hs_path = str(raw.get("handshake_trust_anchor_file") or "")
         if raw.get("type_allowlist"):
             types = frozenset(
                 item.strip().upper()
                 for item in _string_list(raw.get("type_allowlist"))
-                if item.strip()
-            )
+                if item.strip())
         else:
-            types = frozenset(item.strip().upper() for item in DEFAULT_TYPES.split(",") if item.strip())
-        digests = tuple(int(item) for item in _string_list(raw.get("ds_digest_types", "2")) if str(item).strip())
+            types = frozenset(item.strip().upper()
+                              for item in DEFAULT_TYPES.split(",")
+                              if item.strip())
+        digests = tuple(
+            int(item) for item in _string_list(raw.get("ds_digest_types", "2"))
+            if str(item).strip())
         tsig_name, tsig_secret, tsig_algo = _global_tsig(raw)
         return cls(
             service_ns=service_ns,
             secondaries=_secondaries_value(raw.get("secondaries", [])),
-            resolver_base_url=str(raw.get("resolver_base_url") or "https://api.isthisyou.org/"),
+            resolver_base_url=str(
+                raw.get("resolver_base_url") or "https://api.isthisyou.org/"),
             catalog_zone=catalog,
             catalog_rname=rname,
             data_dir=Path(str(raw.get("data_dir") or "/opt/data")),
@@ -270,8 +280,6 @@ class Settings:
             gunicorn_workers=_map_int(raw, "gunicorn_workers", 3),
             axfr_children=_map_int(raw, "axfr_children", 5),
             dnskey_cache_seconds=_map_int(raw, "dnskey_cache_seconds", 3600),
-            dns_bind=str(raw.get("dns_bind") or "127.0.0.1"),
-            dns_port=_map_int(raw, "dns_port", 5353),
             nsd_bind=str(raw.get("nsd_bind") or "0.0.0.0"),
             nsd_port=_map_int(raw, "nsd_port", 53),
             max_body_bytes=_map_int(raw, "max_body_bytes", 1048576),
@@ -279,40 +287,56 @@ class Settings:
             max_names=_map_int(raw, "max_names", 1000),
             max_rdata_bytes=_map_int(raw, "max_rdata_bytes", 4096),
             rate_limit_requests=_map_int(raw, "rate_limit_requests", 30),
-            rate_limit_window_seconds=_map_int(raw, "rate_limit_window_seconds", 60),
+            rate_limit_window_seconds=_map_int(raw,
+                                               "rate_limit_window_seconds",
+                                               60),
             parent_query_budget=_map_int(raw, "parent_query_budget", 15),
-            parent_query_window_seconds=_map_int(raw, "parent_query_window_seconds", 60),
-            max_doh_queries_per_walk=_map_int(raw, "max_doh_queries_per_walk", 32),
+            parent_query_window_seconds=_map_int(
+                raw, "parent_query_window_seconds", 60),
+            max_doh_queries_per_walk=_map_int(raw, "max_doh_queries_per_walk",
+                                              32),
             serial_future_seconds=_map_int(raw, "serial_future_seconds", 300),
             serial_past_seconds=_map_int(raw, "serial_past_seconds", 3600),
-            rrsig_max_lifetime_seconds=_map_int(raw, "rrsig_max_lifetime_seconds", 30 * 86400),
-            rrsig_inception_future_seconds=_map_int(raw, "rrsig_inception_future_seconds", 300),
-            rrsig_min_remaining_seconds=_map_int(raw, "rrsig_min_remaining_seconds", 0),
+            rrsig_max_lifetime_seconds=_map_int(raw,
+                                                "rrsig_max_lifetime_seconds",
+                                                30 * 86400),
+            rrsig_inception_future_seconds=_map_int(
+                raw, "rrsig_inception_future_seconds", 300),
+            rrsig_min_remaining_seconds=_map_int(
+                raw, "rrsig_min_remaining_seconds", 0),
             grace_days=_map_int(raw, "grace_days", 90),
-            negative_cache_ttl_seconds=_map_int(raw, "negative_cache_ttl_seconds", 60),
+            negative_cache_ttl_seconds=_map_int(raw,
+                                                "negative_cache_ttl_seconds",
+                                                60),
             min_ttl=_map_int(raw, "min_ttl", 30),
             max_ttl=_map_int(raw, "max_ttl", 86400),
             ds_digest_types=digests,
-            apexes_per_parent_per_day=_map_int(raw, "apexes_per_parent_per_day", 0),
-            doh_timeout_seconds=float(raw.get("doh_timeout_seconds") if raw.get("doh_timeout_seconds") not in (None, "") else 5),
+            apexes_per_parent_per_day=_map_int(raw,
+                                               "apexes_per_parent_per_day", 0),
+            doh_timeout_seconds=float(
+                raw.get("doh_timeout_seconds") if raw.
+                get("doh_timeout_seconds") not in (None, "") else 5),
             doh_cd=_map_int(raw, "doh_cd", 1),
             trust_anchors=load_ds_anchors(anchor_path),
-            handshake_root_servers=_names_value(raw.get("handshake_root_servers", [])),
-            handshake_trust_anchors=load_ds_anchors(Path(hs_path)) if hs_path else [],
+            handshake_root_servers=_names_value(
+                raw.get("handshake_root_servers", [])),
+            handshake_trust_anchors=load_ds_anchors(Path(hs_path))
+            if hs_path else [],
             tsig_key_name=tsig_name,
             tsig_secret=tsig_secret,
             tsig_algo=tsig_algo,
             axfr_require_tsig=_map_bool(raw, "axfr_require_tsig", False),
-            allow_localhost_xfr=_map_bool(raw, "allow_localhost_xfr", True),
             manage_nsd=_map_bool(raw, "manage_nsd", True),
-            maintenance_interval_seconds=_map_int(raw, "maintenance_interval_seconds", 300),
+            maintenance_interval_seconds=_map_int(
+                raw, "maintenance_interval_seconds", 300),
             soa_refresh=_map_int(raw, "soa_refresh", 3600),
             soa_retry=_map_int(raw, "soa_retry", 600),
             soa_expire=_map_int(raw, "soa_expire", 864000),
             soa_minimum=_map_int(raw, "soa_minimum", 300),
             catalog_ttl=_map_int(raw, "catalog_ttl", 300),
             type_allowlist=types,
-            trusted_proxies=parse_trusted_proxies(_csv(raw.get("trusted_proxies", ""))),
+            trusted_proxies=parse_trusted_proxies(
+                _csv(raw.get("trusted_proxies", ""))),
             health_check_dns=_map_bool(raw, "health_check_dns", True),
         )
 
@@ -353,7 +377,10 @@ def _names_value(value) -> list:
     if value is None or value == "" or value == []:
         return []
     if isinstance(value, (list, tuple)):
-        return [normalise_name(str(item), what="configured name") for item in value if str(item).strip()]
+        return [
+            normalise_name(str(item), what="configured name") for item in value
+            if str(item).strip()
+        ]
     return parse_csv_names(str(value))
 
 
@@ -373,12 +400,12 @@ def _global_tsig(raw: dict) -> tuple[str, str, str]:
         block = {}
     name = str(raw.get("tsig_key_name") or block.get("name") or "")
     algo = str(raw.get("tsig_algo") or block.get("algorithm") or "hmac-sha256")
-    secret = _read_secret(
-        {
-            "tsig_secret": raw.get("tsig_secret", block.get("secret", "")),
-            "tsig_secret_file": raw.get("tsig_secret_file", block.get("secret_file", "")),
-        }
-    )
+    secret = _read_secret({
+        "tsig_secret":
+        raw.get("tsig_secret", block.get("secret", "")),
+        "tsig_secret_file":
+        raw.get("tsig_secret_file", block.get("secret_file", "")),
+    })
     return name, secret, algo
 
 
@@ -386,7 +413,9 @@ def _secondaries_value(value) -> list:
     if value is None or value == "" or value == []:
         return []
     if isinstance(value, str):
-        return [Secondary(host, port) for host, port in parse_secondaries(value)]
+        return [
+            Secondary(host, port) for host, port in parse_secondaries(value)
+        ]
     out = []
     for item in value:
         if isinstance(item, str):
@@ -395,7 +424,8 @@ def _secondaries_value(value) -> list:
             continue
         if not isinstance(item, dict):
             raise SystemExit("each secondary must be a mapping or an address")
-        host = str(item.get("ip") or item.get("address") or item.get("host") or "")
+        host = str(
+            item.get("ip") or item.get("address") or item.get("host") or "")
         if not host:
             raise SystemExit("a secondary is missing ip")
         ipaddress.ip_address(host)
@@ -404,11 +434,13 @@ def _secondaries_value(value) -> list:
             Secondary(
                 host=host,
                 port=int(item.get("port") or 53),
-                tsig_key_name=str(item.get("tsig_key_name") or item.get("key_name") or ""),
+                tsig_key_name=str(
+                    item.get("tsig_key_name") or item.get("key_name") or ""),
                 tsig_secret=secret,
-                tsig_algo=str(item.get("tsig_algo") or item.get("algorithm") or "hmac-sha256"),
-            )
-        )
+                tsig_algo=str(
+                    item.get("tsig_algo") or item.get("algorithm")
+                    or "hmac-sha256"),
+            ))
     return out
 
 
@@ -420,27 +452,30 @@ def log_effective(settings: Settings) -> None:
     secondaries = []
     for item in settings.secondaries:
         host, port = item[0], item[1]
-        secondaries.append(
-            {
-                "ip": host,
-                "port": port,
-                "tsig": bool(getattr(item, "tsig_key_name", "") and getattr(item, "tsig_secret", "")),
-            }
-        )
+        secondaries.append({
+            "ip":
+            host,
+            "port":
+            port,
+            "tsig":
+            bool(
+                getattr(item, "tsig_key_name", "")
+                and getattr(item, "tsig_secret", "")),
+        })
     log(
         "info",
         "configuration",
         service_ns=[name.to_text() for name in settings.service_ns],
         resolver_base_url=settings.resolver_base_url,
-        catalog_zone=settings.catalog_zone.to_text() if settings.catalog_zone is not None else "",
+        catalog_zone=settings.catalog_zone.to_text()
+        if settings.catalog_zone is not None else "",
         secondaries=secondaries,
         grace_days=settings.grace_days,
-        dns_bind=settings.dns_bind,
-        dns_port=settings.dns_port,
+        dns_bind=DNS_BIND,
+        dns_port=DNS_PORT,
         nsd_bind=settings.nsd_bind,
         nsd_port=settings.nsd_port,
         http_port=settings.http_port,
         internal_http_port=settings.internal_http_port,
         data_dir=str(settings.data_dir),
-        allow_localhost_xfr=settings.allow_localhost_xfr,
     )

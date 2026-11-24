@@ -12,11 +12,8 @@ internal_http_port: 8081
 gunicorn_bind: 127.0.0.1:8000
 gunicorn_workers: 2
 
-dns_bind: 127.0.0.1
-dns_port: 5353
 nsd_bind: 0.0.0.0
 nsd_port: 53
-allow_localhost_xfr: true
 secondaries: []
 
 trusted_proxies:
