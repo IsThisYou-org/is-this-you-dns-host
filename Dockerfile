@@ -27,6 +27,7 @@ RUN apk add --no-cache \
 WORKDIR /app
 COPY gunicorn.conf.py ./
 COPY src ./src
+RUN python3 -m compileall -q /app/src /app/gunicorn.conf.py
 COPY deploy/root-anchors.ds ./deploy/root-anchors.ds
 COPY deploy/config.example.yaml /usr/local/share/dns-host/config.example.yaml
 COPY deploy/inittab /etc/inittab
