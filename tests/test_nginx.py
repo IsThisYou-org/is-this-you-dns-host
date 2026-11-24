@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from dns_host.render_nginx import render
+from dns_host.serve_nginx import NGINX_CONF
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,6 +24,17 @@ def test_nginx_is_plain_http_and_trusts_only_configured_proxies():
     assert "pid /run/nginx.pid;" in text
     assert "/tmp/nginx-body" in text
     assert "/opt/data" not in text
+
+
+def test_generated_nginx_config_is_on_tmpfs():
+    assert NGINX_CONF == Path("/run/nginx/nginx.conf")
+    launch = (_ROOT /
+              "src/dns_host/serve_nginx.py").read_text(encoding="utf-8")
+    assert "data_dir()" not in launch
+    assert "/opt/data" not in launch
+    for name in ("bin/start_nginx", "bin/start_up"):
+        script = (_ROOT / name).read_text(encoding="utf-8")
+        assert "/run/nginx" in script
 
 
 def test_read_only_root_uses_dev_shm_and_an_explicit_gunicorn_socket():
