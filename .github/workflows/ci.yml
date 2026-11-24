@@ -60,7 +60,7 @@ jobs:
           import dns.rcode
           import dns.rdatatype
 
-          for port in (80, 8081, 5353, 53):
+          for port in (80, 8081, 9100, 5353, 53):
               socket.create_connection(("127.0.0.1", port), 3).close()
           deadline = time.time() + 20
           last = None

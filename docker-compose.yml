@@ -12,6 +12,7 @@ services:
       # NSD binds 53 and nginx binds 80, then NSD drops to the nsd user.
       - NET_BIND_SERVICE
     ports:
+      # 9100 serves /metrics. Publish it only on the Prometheus network.
       - "80:80"
       - "53:53/udp"
       - "53:53/tcp"

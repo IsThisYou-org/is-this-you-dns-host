@@ -30,14 +30,18 @@ def test_nsec_zone_is_rejected(env):
     assert env.lab.calls == []
 
 
-def test_health_and_metrics(env):
+def test_health_and_metrics(env, monkeypatch):
     health = env.client.get("/health")
     assert health.status_code == 200
     assert health.get_json()["dns"] == "skipped"
     assert health.get_json()["catalogZone"] == "catalog.svc.test."
+    monkeypatch.setattr("dns_host.nsd_metrics.collect_nsd_stats", lambda:
+                        (False, ""))
     metrics = env.client.get("/metrics")
-    assert metrics.status_code == 200
-    assert "uploads_ok" in metrics.get_json()
+    assert metrics.status_code == 503
+    assert "version=0.0.4" in metrics.content_type
+    assert "nsd_up 0" in metrics.get_data(as_text=True)
+    assert env.client.get("/ext/metrics").status_code == 404
 
 
 def test_config_lists_service_nameservers(env):

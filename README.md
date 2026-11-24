@@ -32,6 +32,7 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 | 5353/tcp | `127.0.0.1` | Pre-fork AXFR service (default 5 children). Fixed address. IXFR is not requested. Localhost AXFR is always allowed. | no |
 | 8081/tcp | `127.0.0.1` | nginx internal listener (`/api/` is the `/int/` tree). Fixed address. Not published. | no |
 | 8000/tcp | `127.0.0.1` | gunicorn. Fixed address. Not published. | no |
+| 9100/tcp | `0.0.0.0` | nginx metrics listener (`GET /metrics` only). Fixed port. Not published by Compose. | no |
 
 Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
 
@@ -48,16 +49,19 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
-| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the NSD control socket, nginx temp files |
+| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
 
 ### HTTP
 
 nginx presents each application tree as `/api/` on its own listener.
 
-* External, port 80: `GET /health`, `GET /config`, `GET /metrics`, `POST /api/v1/zones/{apex}`, and the same paths under `/ext/` on gunicorn.
+* External, port 80: `GET /health`, `GET /config`, `POST /api/v1/zones/{apex}`, and the same paths under `/ext/` on gunicorn. `/metrics` is not on this listener.
 * Internal, `127.0.0.1:8081` (fixed): `POST /api/zones/drop` and `POST /api/zones/parent-state` (gunicorn paths `/int/zones/...`). Expire and delete are not on the public listener. gunicorn listens on `127.0.0.1:8000`, which is also fixed.
+* Metrics, port 9100 (fixed): `GET /metrics`. nginx proxies that path to gunicorn `/int/metrics`.
 
-`/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. `/metrics` reports upload, lookup, AXFR, NOTIFY and grace counters.
+`/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. `/metrics` runs `nsd-control stats_noreset` and returns Prometheus text (`text/plain; version=0.0.4`). Names are prefixed `nsd_`. A failed scrape is HTTP 503 and `nsd_up 0`.
+
+Publish port 9100 only on the internal network or the network where Prometheus runs. Do not publish it on a public interface. Restrict `/metrics` at the TLS shedder or the firewall as well if a scrape should not be anonymous; the service does not authenticate it.
 
 `GET /config` is unauthenticated and is not under `/v1`. It returns `{"ns": ["ns1.example.net.", ...]}` from the configured `service_ns` list, in that order, and sets `Cache-Control: public, max-age=300`.
 
@@ -150,7 +154,7 @@ On success the API writes wire-format AXFR data into the spool (an empty `mktemp
 | Zone controller | one process | Polls the spool, ignores empty files, directories and hidden names, re-checks the SOA serial, installs the zone, ages out zones expired for more than 90 days. |
 | DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
 | DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
-| NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). |
+| NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). Remote control listens on `127.0.0.1:8952`. |
 | cron | busybox `crond` | Deletes empty spool files and orphaned `tmp` files older than five minutes. |
 
 ## Secondaries

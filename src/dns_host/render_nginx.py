@@ -15,7 +15,13 @@ from __future__ import annotations
 
 import sys
 
-from dns_host.config import GUNICORN_BIND, HTTP_PORT, INTERNAL_HTTP_PORT, Settings
+from dns_host.config import (
+    GUNICORN_BIND,
+    HTTP_PORT,
+    INTERNAL_HTTP_PORT,
+    METRICS_PORT,
+    Settings,
+)
 
 
 def render(
@@ -99,17 +105,6 @@ http {{
             proxy_read_timeout 60s;
         }}
 
-        location = /metrics {{
-            proxy_pass http://{GUNICORN_BIND}/ext/metrics;
-            proxy_http_version 1.1;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $remote_addr;
-            proxy_set_header X-Forwarded-Proto $forwarded_proto;
-            proxy_set_header Connection "";
-            proxy_read_timeout 60s;
-        }}
-
         location /api/ {{
             proxy_pass http://{GUNICORN_BIND}/ext/;
             proxy_http_version 1.1;
@@ -134,6 +129,19 @@ http {{
 
         location /api/ {{
             proxy_pass http://{GUNICORN_BIND}/int/;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header Connection "";
+            proxy_read_timeout 60s;
+        }}
+    }}
+
+    # NSD metrics. Not on the public listener.
+    server {{
+        listen {METRICS_PORT};
+        location = /metrics {{
+            proxy_pass http://{GUNICORN_BIND}/int/metrics;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
