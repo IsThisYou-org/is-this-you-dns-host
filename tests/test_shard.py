@@ -184,6 +184,10 @@ def test_readme_and_cron_document_the_layout():
     assert "127.0.0.1:5353" in readme
     assert "(hash >> 16) ^ (hash & 0xFFFF)" in readme
     assert "every 15 minutes" in readme.lower() or "Every 15 minutes" in readme
+    assert "cron.log" not in readme
+    start_cron = (root / "bin" / "start_cron").read_text(encoding="utf-8")
+    assert "crond -f -S -c /etc/crontabs" in start_cron
+    assert "cron.log" not in start_cron
     cron = (root / "deploy" / "crontabs" / "root").read_text(encoding="utf-8")
     assert cron.count("*/15 * * * *") == 2
     assert "-mmin +5" in cron

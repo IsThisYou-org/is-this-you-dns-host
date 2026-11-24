@@ -189,7 +189,7 @@ On success the API writes wire-format AXFR data into the spool (an empty `mktemp
 | DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
 | DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
 | NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). Member zones come from that catalog and are stored with `zonefile: "%1/%2/%s.zone"`. Writes those files every 60 seconds, loads them on restart, then checks SOA. Remote control listens on `127.0.0.1:8952`. |
-| cron | busybox `crond` | Every 15 minutes, deletes empty spool files and orphaned `tmp` files older than five minutes. |
+| cron | busybox `crond -S` | Every 15 minutes, deletes empty spool files and orphaned `tmp` files older than five minutes. Messages go to syslog. |
 
 ## Secondaries
 
