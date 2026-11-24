@@ -24,4 +24,6 @@ chmod 1777 /tmp/nginx-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi 
 if [ ! -f /opt/data/etc/config.yaml ]; then
   cp /usr/local/share/dns-host/config.example.yaml /opt/data/etc/config.yaml
 fi
+# Move leftover flat per-zone files into <hh>/<ll>/. Safe to repeat.
+python3 -m dns_host.shard
 exec /sbin/init

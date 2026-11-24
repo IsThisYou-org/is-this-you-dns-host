@@ -1,3 +1,5 @@
-# Drop empty spool placeholders and orphaned tmp files after a few minutes.
-* * * * * find /opt/data/spool -maxdepth 1 -type f -empty -mmin +5 -delete
-* * * * * find /opt/data/spool/tmp -type f -mmin +5 -delete
+# The spool is a queue of uniquely named job files, not one file per zone,
+# so it is not sharded. -maxdepth 1 sees every empty placeholder. tmp/ holds
+# the payload before rename and is not sharded either.
+*/15 * * * * find /opt/data/spool -maxdepth 1 -type f -empty -mmin +5 -delete
+*/15 * * * * find /opt/data/spool/tmp -type f -mmin +5 -delete

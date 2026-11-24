@@ -24,7 +24,7 @@ import dns.rdataclass
 import dns.rdatatype
 
 from dns_host.catalogfile import Catalog
-from dns_host.config import DNS_BIND, DNS_PORT
+from dns_host.config import DNS_BIND, DNS_PORT, data_dir
 from dns_host.logutil import log
 from dns_host.wireaxfr import with_query_id
 
@@ -224,6 +224,9 @@ def main() -> None:
     settings = Settings.load(args.config or None)
     settings.require_service_ns()
     log_effective(settings)
+    from dns_host.shard import migrate_flat_zone_files
+
+    migrate_flat_zone_files(data_dir() / "zones")
     prefork(settings)
 
 

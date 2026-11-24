@@ -199,11 +199,13 @@ class RemoteMaintenance:
 
         from dns_host.chain import authenticate_parent
         from dns_host.names import normalise_name
+        from dns_host.shard import locate_zone_file
         from dns_host.zone import document_to_zone
         from dns_host.zonesync import zone_filename
 
-        path = data_dir() / "zones" / zone_filename(row["apex"])
-        if not path.is_file():
+        path = locate_zone_file(data_dir() / "zones", row["apex"],
+                                zone_filename(row["apex"]))
+        if path is None:
             return
         document = json.loads(path.read_text(encoding="utf-8"))
         apex = normalise_name(row["apex"])

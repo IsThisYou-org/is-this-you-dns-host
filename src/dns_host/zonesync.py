@@ -13,6 +13,7 @@ from pathlib import Path
 
 import dns.name
 
+from dns_host.shard import locate_zone_file, zone_file_name, zone_path
 from dns_host.zone import document_to_zone
 
 
@@ -21,12 +22,11 @@ def zones_dir_for(db_path: Path) -> Path:
 
 
 def zone_filename(apex: str) -> str:
-    name = apex.strip().lower()
-    if name.endswith("."):
-        name = name[:-1]
-    if not name or "/" in name or name in {".", ".."} or "\\" in name:
-        raise ValueError(f"unsafe apex {apex}")
-    return name + ".json"
+    return zone_file_name(apex, ".json")
+
+
+def member_path(directory: Path, apex: str) -> Path:
+    return zone_path(directory, apex, zone_filename(apex))
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -38,7 +38,7 @@ def atomic_write(path: Path, text: str) -> None:
 
 def write_member(directory: Path, apex: str, document: dict) -> None:
     atomic_write(
-        directory / zone_filename(apex),
+        member_path(directory, apex),
         json.dumps(document, separators=(",", ":"), sort_keys=True),
     )
 
@@ -94,9 +94,11 @@ class ZoneIndex:
                 if self.serials.get(apex) == serial and apex in self.zones:
                     zones[apex] = self.zones[apex]
                     continue
-                document = json.loads(
-                    (self.directory /
-                     zone_filename(apex)).read_text(encoding="utf-8"))
+                member = locate_zone_file(self.directory, apex,
+                                          zone_filename(apex))
+                if member is None:
+                    raise FileNotFoundError(apex)
+                document = json.loads(member.read_text(encoding="utf-8"))
                 zones[apex] = document_to_zone(dns.name.from_text(apex),
                                                document)
         except Exception:
