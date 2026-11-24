@@ -56,3 +56,44 @@ def test_nginx_without_trusted_proxies_does_not_rewrite_addresses():
     text = render(100, [])
     assert "\n        set_real_ip_from " not in text
     assert "listen 80;" in text
+
+
+def test_generated_nginx_conf_is_written_on_tmpfs(monkeypatch):
+    from dns_host.config import Settings
+    from dns_host.serve_nginx import NGINX_CONF, main
+
+    captured = {}
+    settings = Settings(
+        service_ns=["ns1.example.net."],
+        trusted_proxies=["172.28.9.0/24"],
+        max_body_bytes=100,
+    )
+
+    def capture_write(path, text):
+        captured["path"] = path
+        captured["text"] = text
+
+    def capture_exec(program, argv):
+        captured["program"] = program
+        captured["argv"] = argv
+
+    monkeypatch.setattr("dns_host.serve_nginx.atomic_write", capture_write)
+    monkeypatch.setattr("dns_host.serve_nginx.os.execvp", capture_exec)
+    monkeypatch.setattr("dns_host.serve_nginx.log_effective",
+                        lambda _settings: None)
+    monkeypatch.setattr("dns_host.serve_nginx.Settings.load", lambda: settings)
+    main()
+    assert captured["path"] == Path("/run/nginx/nginx.conf")
+    assert captured["path"] == NGINX_CONF
+    assert "listen 80;" in captured["text"]
+    assert "set_real_ip_from 172.28.9.0/24;" in captured["text"]
+    assert "/opt/data" not in captured["text"]
+    assert captured["program"] == "nginx"
+    assert captured["argv"][captured["argv"].index("-c") +
+                            1] == str(NGINX_CONF)
+    start_nginx = (_ROOT / "bin/start_nginx").read_text(encoding="utf-8")
+    start_up = (_ROOT / "bin/start_up").read_text(encoding="utf-8")
+    assert "/run/nginx" in start_nginx
+    assert "/run/nginx" in start_up
+    assert 'data_dir() / "etc" / "nginx.conf"' not in (
+        _ROOT / "src/dns_host/serve_nginx.py").read_text(encoding="utf-8")

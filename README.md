@@ -36,7 +36,7 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 
 Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
 
-NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx temp files are under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
+NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx writes its generated config to `/run/nginx/nginx.conf` at each start, and its temp files under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
 
 ### Layout
 
@@ -49,7 +49,8 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
-| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
+| `/run/nginx/nginx.conf` | Generated nginx config. Rewritten at every start. |
+| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the generated nginx config, nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
 
 ### HTTP
 
