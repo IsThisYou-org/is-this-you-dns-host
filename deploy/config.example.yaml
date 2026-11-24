@@ -43,6 +43,16 @@ dnskey_cache_seconds: 3600
 #     tsig_algo: hmac-sha256
 secondaries: []
 
+# Debugging AXFR clients, in addition to secondaries. Each entry is an
+# IPv4 or IPv6 CIDR. A bare address is a /32 or /128. NSD emits
+# provide-xfr for these networks (NOKEY). NOTIFY is still sent only to
+# secondaries.
+# axfr_allow:
+#   - 192.0.2.0/24
+#   - 2001:db8:1::/48
+#   - 203.0.113.50
+axfr_allow: []
+
 # Set this to the TLS shedder network when using docker-compose.tls.yml.
 # The easy-nginx overlay uses 172.28.9.0/24.
 trusted_proxies: []

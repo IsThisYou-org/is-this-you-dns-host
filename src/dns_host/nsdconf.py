@@ -1,8 +1,9 @@
-"""NSD configuration generated from the single secondary list.
+"""NSD configuration generated from the secondary list and ``axfr_allow``.
 
-``provide-xfr`` and ``notify`` are emitted from that list only, so they
-cannot drift. TSIG material comes from ``config.yaml`` (or a secret file it
-names). Zone-upload JSON is not an input.
+``notify`` is emitted for secondaries only. ``provide-xfr`` is emitted for
+each secondary and, with ``NOKEY``, for each ``axfr_allow`` network. TSIG
+material comes from ``config.yaml`` (or a secret file it names). Zone-upload
+JSON is not an input.
 """
 
 from __future__ import annotations
@@ -118,12 +119,16 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
 
 
 def _transfer_acl(lines: list[str], settings) -> None:
+    """Secondaries may AXFR and are NOTIFY targets. ``axfr_allow`` may AXFR."""
+
     for secondary in settings.secondaries:
         host, port = secondary[0], secondary[1]
         token = _key_token(secondary)
         endpoint = _endpoint(host, port)
         lines.append(f"    provide-xfr: {endpoint} {token}")
         lines.append(f"    notify: {endpoint} {token}")
+    for network in settings.axfr_allow:
+        lines.append(f"    provide-xfr: {network} NOKEY")
 
 
 def write_nsd_config(settings, zone_names: list[str] | None = None) -> Path:
