@@ -6,9 +6,13 @@ the root DNSKEY, the root NS, and the DS of a name one label below the root.
 The ICANN root DNSKEY and NS are that resolver's local copy (``rd=0``, no
 ``server``); a TLD DS is read with ``rd=0`` at the root nameservers. The
 Handshake fallback follows the same rule and sends Handshake-root data to
-``handshake_root_servers``. TLD and lower DNSKEY, DS below the TLD, and NS
-below the root use ``rd=1`` and ``do=1`` and do not pass ``server`` (that
-parameter is only meaningful with ``rd=0``). ``cd`` follows ``settings.doh_cd``.
+``handshake_root_servers``. TLD and lower DNSKEY, and DS below the TLD, use
+``rd=1`` and ``do=1`` and do not pass ``server`` (that parameter is only
+meaningful with ``rd=0``). ``cd`` follows ``settings.doh_cd``.
+
+Delegation NS are not read from the resolver. Each zone cut is asked of the
+parent's authoritative servers over plain DNS (UDP, TCP if truncated) with
+``rd=0``. Those NS records are unsigned. The DS is what proves the chain.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from dns_host.doh import Lookup, LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.logutil import log
 from dns_host.names import normalise_name
+from dns_host.parent_ns import fetch_delegation_ns, harvest_lookup_glue
 
 DS = dns.rdatatype.DS
 NS = dns.rdatatype.NS
@@ -45,17 +50,35 @@ class Delegation:
     proved_ds_absent: bool
 
 
-class _BudgetLookup:
+class _Budget:
+    """Counts resolver queries and direct parent queries on one walk."""
 
-    def __init__(self, inner: Lookup, cap: int):
-        self.inner = inner
+    def __init__(self, cap: int):
         self.cap = cap
         self.used = 0
 
-    def query(self, name, rdtype, **kwargs) -> LookupResponse:
+    def charge(self) -> None:
         self.used += 1
         if self.used > self.cap:
             raise LookupError("parent lookup fan-out limit exceeded")
+
+
+class _BudgetLookup:
+
+    def __init__(self, inner: Lookup, budget: _Budget):
+        self.inner = inner
+        self.budget = budget
+
+    @property
+    def cap(self) -> int:
+        return self.budget.cap
+
+    @property
+    def used(self) -> int:
+        return self.budget.used
+
+    def query(self, name, rdtype, **kwargs) -> LookupResponse:
+        self.budget.charge()
         return self.inner.query(name, rdtype, **kwargs)
 
 
@@ -63,7 +86,8 @@ def authenticate_parent(lookup: Lookup, settings,
                         apex: dns.name.Name) -> Delegation:
     """Return the authenticated parent delegation for ``apex``."""
 
-    capped = _BudgetLookup(lookup, settings.max_doh_queries_per_walk)
+    budget = _Budget(settings.max_doh_queries_per_walk)
+    capped = _BudgetLookup(lookup, budget)
     now = settings.now()
     try:
         if not settings.trust_anchors:
@@ -80,6 +104,7 @@ def authenticate_parent(lookup: Lookup, settings,
                 root_server=None,
                 cache=cache,
                 root_id="icann",
+                budget=budget,
             )
         except ApiError as first:
             if (first.error in {"parent_ds_missing", "parent_chain_invalid"}
@@ -98,6 +123,7 @@ def authenticate_parent(lookup: Lookup, settings,
                     root_server=settings.handshake_root_servers[0].to_text(),
                     cache=cache,
                     root_id="handshake",
+                    budget=budget,
                 )
             raise
     except LookupError as exc:
@@ -118,7 +144,11 @@ def _walk_from_root(lookup,
                     anchors,
                     root_server,
                     cache=None,
-                    root_id="icann") -> Delegation:
+                    root_id="icann",
+                    budget=None) -> Delegation:
+    if budget is None:
+        budget = _Budget(settings.max_doh_queries_per_walk)
+    glue = {}
     dnskey, _dnskey_sigs = _cached_dnskey(
         lookup,
         settings,
@@ -129,9 +159,13 @@ def _walk_from_root(lookup,
         "root DNSKEY",
         cache,
         root_id,
+        glue,
     )
-    ns_rrset, ns_sigs = _query_type(lookup, settings, dns.name.root, "NS",
-                                    [root_server])
+    ns_rrset, ns_sigs = _query_type(lookup,
+                                    settings,
+                                    dns.name.root,
+                                    "NS", [root_server],
+                                    glue=glue)
     if ns_rrset is None or ns_sigs is None:
         raise ApiError(503, "parent_lookup_unavailable",
                        "root NS was not returned")
@@ -154,13 +188,14 @@ def _walk_from_root(lookup,
                                                      child,
                                                      "DS",
                                                      ds_servers,
-                                                     with_response=True)
-        ns_rrset, _ns_sigs, ns_response = _query_type(lookup,
-                                                      settings,
-                                                      child,
-                                                      "NS",
-                                                      parent_servers,
-                                                      with_response=True)
+                                                     with_response=True,
+                                                     glue=glue)
+        # The parent is asked directly. A resolver query for this NS follows
+        # the referral into the child, which is not served until admission,
+        # and that SERVFAIL must not be reported as the parent's answer.
+        ns_rrset, ns_response = fetch_delegation_ns(lookup, settings, child,
+                                                    parent_servers, glue,
+                                                    budget)
         if _is_nxdomain(ds_response) and _is_nxdomain(ns_response):
             if _proved_nxdomain(child, ds_response, parent_zone, parent_keys,
                                 now) or _proved_nxdomain(
@@ -179,13 +214,11 @@ def _walk_from_root(lookup,
                     now) or _proved_nodata(child, NS, ds_response, parent_zone,
                                            parent_keys, now)):
                 continue
-            if is_target:
-                raise ApiError(
-                    403, "parent_chain_invalid",
-                    f"parent returned no delegation NS for {child}")
             raise ApiError(
-                403, "parent_chain_invalid",
-                f"no delegation for {child} and no authenticated denial")
+                403,
+                "parent_chain_invalid",
+                f"parent served no delegation for {child}",
+            )
         proved_absent = False
         if ds_rrset is None:
             proved_absent = _proved_nodata(child, DS, ds_response, parent_zone,
@@ -226,9 +259,14 @@ def _walk_from_root(lookup,
             f"DNSKEY {child}",
             cache,
             root_id,
+            glue,
         )
-        auth_ns, auth_ns_sigs = _query_type(lookup, settings, child, "NS",
-                                            child_servers)
+        auth_ns, auth_ns_sigs = _query_type(lookup,
+                                            settings,
+                                            child,
+                                            "NS",
+                                            child_servers,
+                                            glue=glue)
         if auth_ns is None or auth_ns_sigs is None:
             raise ApiError(503, "parent_lookup_unavailable",
                            f"authoritative NS for {child} was not returned")
@@ -239,8 +277,16 @@ def _walk_from_root(lookup,
     raise ApiError(403, "parent_chain_invalid", f"walk did not reach {apex}")
 
 
-def _cached_dnskey(lookup, settings, name, servers, ds_records, now, what,
-                   cache, root_id):
+def _cached_dnskey(lookup,
+                   settings,
+                   name,
+                   servers,
+                   ds_records,
+                   now,
+                   what,
+                   cache,
+                   root_id,
+                   glue=None):
     """Return a DNSKEY RRset validated up to ``root_id``, using the worker cache."""
 
     if cache is not None:
@@ -250,7 +296,12 @@ def _cached_dnskey(lookup, settings, name, servers, ds_records, now, what,
             if _keys_matching_ds(name, dnskey, ds_records,
                                  settings.ds_digest_types):
                 return dnskey, signatures
-    dnskey, signatures = _query_type(lookup, settings, name, "DNSKEY", servers)
+    dnskey, signatures = _query_type(lookup,
+                                     settings,
+                                     name,
+                                     "DNSKEY",
+                                     servers,
+                                     glue=glue)
     if dnskey is None or signatures is None:
         raise ApiError(503, "parent_lookup_unavailable",
                        f"{what} was not returned")
@@ -284,7 +335,13 @@ def _root_zone_query(name, rdtype: str) -> bool:
     return rdtype == "DS" and qname.parent() == dns.name.root
 
 
-def _query_type(lookup, settings, name, rdtype, servers, with_response=False):
+def _query_type(lookup,
+                settings,
+                name,
+                rdtype,
+                servers,
+                with_response=False,
+                glue=None):
     qname = name if isinstance(name, dns.name.Name) else normalise_name(
         str(name), allow_root=True)
     # server= is only meaningful with rd=0. Below the root the resolver must
@@ -310,6 +367,8 @@ def _query_type(lookup, settings, name, rdtype, servers, with_response=False):
             )
             continue
         last_response = response
+        if glue is not None:
+            harvest_lookup_glue(response, glue)
         if response.status not in (0, 3):
             continue
         rrset, sigs = _extract(response, qname, rdtype)
