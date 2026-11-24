@@ -81,7 +81,10 @@ def load_zone_file(path: str | Path, apex: str | None = None) -> dns.zone.Zone:
         if origin is None:
             raise ZonePushError("zone file has no $ORIGIN; pass --apex")
     try:
-        return dns.zone.from_text(raw, origin=origin, relativize=False, check_origin=False)
+        return dns.zone.from_text(raw,
+                                  origin=origin,
+                                  relativize=False,
+                                  check_origin=False)
     except dns.exception.DNSException as exc:
         raise ZonePushError(f"could not read the zone file: {exc}") from exc
 
@@ -92,8 +95,10 @@ def build_tsig(key_name: str, secret: str, algorithm: str):
     algo = _TSIG_ALGORITHMS.get(algorithm.strip().lower())
     if algo is None:
         known = ", ".join(sorted(_TSIG_ALGORITHMS))
-        raise ZonePushError(f"TSIG algorithm {algorithm!r} is not one of {known}")
-    owner = dns.name.from_text(key_name if key_name.endswith(".") else key_name + ".")
+        raise ZonePushError(
+            f"TSIG algorithm {algorithm!r} is not one of {known}")
+    owner = dns.name.from_text(
+        key_name if key_name.endswith(".") else key_name + ".")
     try:
         ring = dns.tsigkeyring.from_text({owner.to_text(): secret})
     except Exception as exc:
@@ -120,16 +125,21 @@ def load_axfr(
     kwargs = {"port": int(port), "timeout": timeout, "relativize": False}
     if tsig_key_name or tsig_secret:
         if not tsig_key_name or not tsig_secret:
-            raise ZonePushError("TSIG needs both --tsig-key-name and --tsig-secret")
-        keyring, keyname, algorithm = build_tsig(tsig_key_name, tsig_secret, tsig_algo)
+            raise ZonePushError(
+                "TSIG needs both --tsig-key-name and --tsig-secret")
+        keyring, keyname, algorithm = build_tsig(tsig_key_name, tsig_secret,
+                                                 tsig_algo)
         kwargs["keyring"] = keyring
         kwargs["keyname"] = keyname
         kwargs["keyalgorithm"] = algorithm
     try:
         messages = dns.query.xfr(server, apex, **kwargs)
-        return dns.zone.from_xfr(messages, zone_factory=dns.zone.Zone, relativize=False)
+        return dns.zone.from_xfr(messages,
+                                 zone_factory=dns.zone.Zone,
+                                 relativize=False)
     except Exception as exc:
-        raise ZonePushError(f"AXFR of {apex} from {server}:{port} failed: {exc}") from exc
+        raise ZonePushError(
+            f"AXFR of {apex} from {server}:{port} failed: {exc}") from exc
 
 
 def zone_to_upload(zone: dns.zone.Zone) -> dict:
@@ -143,24 +153,31 @@ def zone_to_upload(zone: dns.zone.Zone) -> dict:
     if zone.origin is None:
         raise ZonePushError("zone has no origin")
     origin = zone.origin
-    # dnspython keeps one RRSIG rdataset per covered type. The upload API
-    # wants a single RRSIG RRset per owner, which is how a master file is
-    # written and how the service parses it.
-    grouped: dict[tuple[str, str], dict] = {}
-    order: list[tuple[str, str]] = []
-    for name in sorted(zone.nodes, key=lambda item: tuple(reversed(item.canonicalize().labels))):
+    # One JSON item per RRset. RRSIG is one RRset per covered type, so a URI
+    # signature can carry a different TTL from the SOA signature at the same
+    # owner. Several signatures over one type (a rollover) share that TTL.
+    grouped: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for name in sorted(
+            zone.nodes,
+            key=lambda item: tuple(reversed(item.canonicalize().labels))):
         node = zone.nodes[name]
         absolute = name if name.is_absolute() else name.derelativize(origin)
         for rdataset in node.rdatasets:
             if int(rdataset.rdclass) != int(dns.rdataclass.IN):
                 continue
-            texts = [rdata.to_text(origin=origin, relativize=False) for rdata in rdataset]
+            texts = [
+                rdata.to_text(origin=origin, relativize=False)
+                for rdata in rdataset
+            ]
             if not texts:
                 continue
             type_name = dns.rdatatype.to_text(rdataset.rdtype)
             if int(rdataset.rdtype) == WALLET_TYPE:
                 type_name = "WALLET"
-            key = (absolute.to_text(), type_name)
+            covered = int(rdataset.covers) if int(rdataset.rdtype) == int(
+                dns.rdatatype.RRSIG) else None
+            key = (absolute.to_text(), type_name, covered)
             bucket = grouped.get(key)
             if bucket is None:
                 grouped[key] = {
@@ -173,7 +190,8 @@ def zone_to_upload(zone: dns.zone.Zone) -> dict:
                 order.append(key)
                 continue
             if int(bucket["ttl"]) != int(rdataset.ttl):
-                raise ZonePushError(f"{key[0]} {type_name} has more than one TTL")
+                detail = type_name if covered is None else f"{type_name} {dns.rdatatype.to_text(covered)}"
+                raise ZonePushError(f"{key[0]} {detail} has more than one TTL")
             bucket["rrdatas"].extend(texts)
     if not grouped:
         raise ZonePushError("zone has no IN records")
@@ -197,7 +215,10 @@ def soa_serial(document: dict) -> int:
     raise ZonePushError("zone has no SOA at the apex")
 
 
-def post_zone(base_url: str, document: dict, *, timeout: float = 60) -> tuple[int, str]:
+def post_zone(base_url: str,
+              document: dict,
+              *,
+              timeout: float = 60) -> tuple[int, str]:
     """POST the document. Returns ``(status, body)`` even when the status is an error."""
 
     apex = document["apex"].rstrip(".")
@@ -208,11 +229,15 @@ def post_zone(base_url: str, document: dict, *, timeout: float = 60) -> tuple[in
         url,
         data=payload,
         method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read().decode("utf-8", errors="replace")
+            return response.status, response.read().decode("utf-8",
+                                                           errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")
 
@@ -227,10 +252,17 @@ def format_body(text: str) -> str:
         return stripped
 
 
-def query_soa_serial(server: str, port: int, apex: str, *, timeout: float = 2) -> int | None:
+def query_soa_serial(server: str,
+                     port: int,
+                     apex: str,
+                     *,
+                     timeout: float = 2) -> int | None:
     query = dns.message.make_query(apex, dns.rdatatype.SOA)
     try:
-        response = dns.query.udp(query, server, port=int(port), timeout=timeout)
+        response = dns.query.udp(query,
+                                 server,
+                                 port=int(port),
+                                 timeout=timeout)
     except Exception:
         return None
     for rrset in response.answer:
@@ -259,36 +291,65 @@ def wait_for_serial(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Convert a signed zone to the hosting service's upload JSON and POST it. "
-            "The service replaces the whole zone; this tool does not edit records itself."
-        )
-    )
+    parser = argparse.ArgumentParser(description=(
+        "Convert a signed zone to the hosting service's upload JSON and POST it. "
+        "The service replaces the whole zone; this tool does not edit records itself."
+    ))
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--zone-file", help="Master-format zone file, already signed")
-    source.add_argument("--axfr-zone", help="Zone name to AXFR from --axfr-server")
+    source.add_argument("--zone-file",
+                        help="Master-format zone file, already signed")
+    source.add_argument("--axfr-zone",
+                        help="Zone name to AXFR from --axfr-server")
     parser.add_argument("--apex", help="Zone apex if the file has no $ORIGIN")
-    parser.add_argument("--axfr-server", default="127.0.0.1", help="AXFR server address (default 127.0.0.1)")
-    parser.add_argument("--axfr-port", type=int, default=53, help="AXFR server port (default 53)")
-    parser.add_argument("--tsig-key-name", default="", help="Optional TSIG key name for the AXFR")
-    parser.add_argument("--tsig-secret", default="", help="Optional TSIG secret, standard base64")
-    parser.add_argument("--tsig-algo", default="hmac-sha256", help="TSIG algorithm (default hmac-sha256)")
+    parser.add_argument("--axfr-server",
+                        default="127.0.0.1",
+                        help="AXFR server address (default 127.0.0.1)")
+    parser.add_argument("--axfr-port",
+                        type=int,
+                        default=53,
+                        help="AXFR server port (default 53)")
+    parser.add_argument("--tsig-key-name",
+                        default="",
+                        help="Optional TSIG key name for the AXFR")
+    parser.add_argument("--tsig-secret",
+                        default="",
+                        help="Optional TSIG secret, standard base64")
+    parser.add_argument("--tsig-algo",
+                        default="hmac-sha256",
+                        help="TSIG algorithm (default hmac-sha256)")
     parser.add_argument(
         "--base-url",
         default="http://127.0.0.1:80",
-        help="Service base URL (default http://127.0.0.1:80). The POST path is /api/v1/zones/{apex}.",
+        help=
+        "Service base URL (default http://127.0.0.1:80). The POST path is /api/v1/zones/{apex}.",
     )
-    parser.add_argument("--timeout", type=float, default=60, help="HTTP and AXFR timeout in seconds")
-    parser.add_argument("--dry-run", action="store_true", help="Print the upload JSON and do not POST")
-    parser.add_argument("--verify", action="store_true", help="After a successful POST, query NSD for the SOA serial")
-    parser.add_argument("--dns-server", default="127.0.0.1", help="NSD address for --verify (default 127.0.0.1)")
-    parser.add_argument("--dns-port", type=int, default=53, help="NSD port for --verify (default 53)")
-    parser.add_argument("--verify-timeout", type=float, default=20, help="Seconds to wait for the SOA serial")
+    parser.add_argument("--timeout",
+                        type=float,
+                        default=60,
+                        help="HTTP and AXFR timeout in seconds")
+    parser.add_argument("--dry-run",
+                        action="store_true",
+                        help="Print the upload JSON and do not POST")
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="After a successful POST, query NSD for the SOA serial")
+    parser.add_argument("--dns-server",
+                        default="127.0.0.1",
+                        help="NSD address for --verify (default 127.0.0.1)")
+    parser.add_argument("--dns-port",
+                        type=int,
+                        default=53,
+                        help="NSD port for --verify (default 53)")
+    parser.add_argument("--verify-timeout",
+                        type=float,
+                        default=20,
+                        help="Seconds to wait for the SOA serial")
     parser.add_argument(
         "--request-id",
         default="",
-        help="Identifier printed with the result, so a failed run is easy to refer to",
+        help=
+        "Identifier printed with the result, so a failed run is easy to refer to",
     )
     return parser
 
@@ -351,7 +412,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"SOA serial {serial} matches {args.dns_server}:{args.dns_port}")
         return 0
     if seen is None:
-        print(f"NSD at {args.dns_server}:{args.dns_port} did not answer SOA for {document['apex']}")
+        print(
+            f"NSD at {args.dns_server}:{args.dns_port} did not answer SOA for {document['apex']}"
+        )
     else:
         print(f"SOA serial mismatch: uploaded {serial}, NSD answered {seen}")
     return 1

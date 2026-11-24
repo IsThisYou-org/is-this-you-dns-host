@@ -42,11 +42,11 @@ def _err(status: int, error: str, message: str) -> ApiError:
 
 def check_limits(zone: ParsedZone, settings) -> None:
     names = {name for name, _rdtype in zone.rrsets}
-    # RRSIG records are their own JSON rrset; count data rrsets plus one RRSIG
-    # rrset per distinct signature owner, which matches the upload document.
+    # Each covered type is its own RRSIG RRset and may have its own TTL.
     sig_owners = {name for name, _covered in zone.sigs}
-    rrset_count = len(zone.rrsets) + len(sig_owners)
-    if rrset_count > settings.max_rrsets or len(names | sig_owners) > settings.max_names:
+    rrset_count = len(zone.rrsets) + len(zone.sigs)
+    if rrset_count > settings.max_rrsets or len(
+            names | sig_owners) > settings.max_names:
         raise _err(
             413,
             "payload_too_large",
@@ -55,9 +55,13 @@ def check_limits(zone: ParsedZone, settings) -> None:
 
 
 def check_soa(zone: ParsedZone, settings, held_serial: int | None) -> int:
-    soa_rrs = [rr for (name, rdtype), rr in zone.rrsets.items() if rdtype == SOA]
-    if len(soa_rrs) != 1 or soa_rrs[0].name != zone.apex or len(soa_rrs[0]) != 1:
-        raise _err(422, "bad_soa", "zone must contain exactly one SOA at the apex")
+    soa_rrs = [
+        rr for (name, rdtype), rr in zone.rrsets.items() if rdtype == SOA
+    ]
+    if len(soa_rrs) != 1 or soa_rrs[0].name != zone.apex or len(
+            soa_rrs[0]) != 1:
+        raise _err(422, "bad_soa",
+                   "zone must contain exactly one SOA at the apex")
     serial = int(list(soa_rrs[0])[0].serial)
     if held_serial is not None and serial <= held_serial:
         raise _err(
@@ -67,9 +71,11 @@ def check_soa(zone: ParsedZone, settings, held_serial: int | None) -> int:
         )
     now = settings.now()
     if serial > now + settings.serial_future_seconds:
-        raise _err(422, "serial_in_future", "SOA serial is too far ahead of the service clock")
+        raise _err(422, "serial_in_future",
+                   "SOA serial is too far ahead of the service clock")
     if serial < now - settings.serial_past_seconds:
-        raise _err(422, "serial_stale", "SOA serial is outside the freshness window")
+        raise _err(422, "serial_stale",
+                   "SOA serial is outside the freshness window")
     return serial
 
 
@@ -81,21 +87,35 @@ def check_types_and_ttl(zone: ParsedZone, settings) -> None:
         if blocked is not None:
             raise _err(422, "type_not_allowed", blocked)
         if text not in allowed:
-            raise _err(422, "type_not_allowed", f"{text} is not in the type allowlist")
-        if int(rrset.ttl) < settings.min_ttl or int(rrset.ttl) > settings.max_ttl:
-            raise _err(422, "ttl_out_of_range", f"TTL {rrset.ttl} at {name} is outside the configured bounds")
+            raise _err(422, "type_not_allowed",
+                       f"{text} is not in the type allowlist")
+        if int(rrset.ttl) < settings.min_ttl or int(
+                rrset.ttl) > settings.max_ttl:
+            raise _err(
+                422, "ttl_out_of_range",
+                f"TTL {rrset.ttl} at {name} is outside the configured bounds")
         for rdata in rrset:
             _check_rdata_length(rdata, name, text, settings)
         if rdtype in APEX_ONLY and name != zone.apex:
-            code = {SOA: "bad_soa", DNSKEY: "bad_dnskey", NSEC3PARAM: "bad_nsec3param"}[rdtype]
+            code = {
+                SOA: "bad_soa",
+                DNSKEY: "bad_dnskey",
+                NSEC3PARAM: "bad_nsec3param"
+            }[rdtype]
             raise _err(422, code, f"{text} is only permitted at the apex")
         if int(rdtype) in APEX_ONLY_DATA and name != zone.apex:
-            raise _err(422, "type_not_allowed", f"{text} is only permitted at the zone apex")
+            raise _err(422, "type_not_allowed",
+                       f"{text} is only permitted at the zone apex")
         if rdtype == NS and name != zone.apex:
-            raise _err(422, "type_not_allowed", "NS is only permitted at the apex")
+            raise _err(422, "type_not_allowed",
+                       "NS is only permitted at the apex")
     for (name, _covered), rrset in zone.sigs.items():
-        if int(rrset.ttl) < settings.min_ttl or int(rrset.ttl) > settings.max_ttl:
-            raise _err(422, "ttl_out_of_range", f"TTL {rrset.ttl} at {name} RRSIG is outside the configured bounds")
+        if int(rrset.ttl) < settings.min_ttl or int(
+                rrset.ttl) > settings.max_ttl:
+            raise _err(
+                422, "ttl_out_of_range",
+                f"TTL {rrset.ttl} at {name} RRSIG is outside the configured bounds"
+            )
         for rdata in rrset:
             _check_rdata_length(rdata, name, "RRSIG", settings)
     by_name: dict = {}
@@ -105,7 +125,9 @@ def check_types_and_ttl(zone: ParsedZone, settings) -> None:
         by_name.setdefault(name, set()).add(rdtype)
     for name, types in by_name.items():
         if CNAME in types and types - {CNAME}:
-            raise _err(422, "type_not_allowed", f"CNAME at {name} shares its owner name with other data")
+            raise _err(
+                422, "type_not_allowed",
+                f"CNAME at {name} shares its owner name with other data")
 
 
 def _check_rdata_length(rdata, name, text, settings) -> None:
@@ -124,20 +146,25 @@ def check_dnskey(zone: ParsedZone) -> None:
         raise _err(422, "bad_dnskey", "apex DNSKEY RRset is missing")
     saw_ksk = False
     for key in rrset:
-        if int(key.algorithm) not in ALLOWED_DNSKEY_ALGS or int(key.protocol) != 3:
-            raise _err(422, "bad_dnskey", "DNSKEY must use protocol 3 and algorithm 13 or 15")
+        if int(key.algorithm) not in ALLOWED_DNSKEY_ALGS or int(
+                key.protocol) != 3:
+            raise _err(422, "bad_dnskey",
+                       "DNSKEY must use protocol 3 and algorithm 13 or 15")
         flags = int(key.flags)
         if flags not in (256, 257):
-            raise _err(422, "bad_dnskey", "DNSKEY flags must be 256 (ZSK) or 257 (KSK)")
+            raise _err(422, "bad_dnskey",
+                       "DNSKEY flags must be 256 (ZSK) or 257 (KSK)")
         if flags == 257:
             saw_ksk = True
     if not saw_ksk:
-        raise _err(422, "bad_dnskey", "apex DNSKEY set has no SEP/KSK (flags 257)")
+        raise _err(422, "bad_dnskey",
+                   "apex DNSKEY set has no SEP/KSK (flags 257)")
 
 
 def check_rrsig_meta(zone: ParsedZone, settings) -> None:
     dnskeys = list(zone.get(DNSKEY) or [])
-    keytags = {(int(key.algorithm), int(dns.dnssec.key_id(key))) for key in dnskeys}
+    keytags = {(int(key.algorithm), int(dns.dnssec.key_id(key)))
+               for key in dnskeys}
     now = settings.now()
     for (name, rdtype), rrset in zone.rrsets.items():
         sigset = zone.sigs.get((name, rdtype))
@@ -148,7 +175,8 @@ def check_rrsig_meta(zone: ParsedZone, settings) -> None:
                 f"{dns.rdatatype.to_text(rdtype)} at {name} has no RRSIG",
             )
         for sig in sigset:
-            _check_one_sig(sig, name, rdtype, rrset.ttl, keytags, zone.apex, now, settings)
+            _check_one_sig(sig, name, rdtype, rrset.ttl, keytags, zone.apex,
+                           now, settings)
     for (name, covered), sigset in zone.sigs.items():
         if (name, covered) not in zone.rrsets:
             raise _err(
@@ -158,29 +186,40 @@ def check_rrsig_meta(zone: ParsedZone, settings) -> None:
             )
 
 
-def _check_one_sig(sig, name, rdtype, ttl, keytags, apex, now, settings) -> None:
+def _check_one_sig(sig, name, rdtype, ttl, keytags, apex, now,
+                   settings) -> None:
     if int(sig.type_covered) != int(rdtype):
-        raise _err(422, "rrsig_key_mismatch", f"RRSIG at {name} covers the wrong type")
+        raise _err(422, "rrsig_key_mismatch",
+                   f"RRSIG at {name} covers the wrong type")
     if int(sig.algorithm) not in ALLOWED_DNSKEY_ALGS:
-        raise _err(422, "rrsig_key_mismatch", f"RRSIG at {name} is not algorithm 13 or 15")
+        raise _err(422, "rrsig_key_mismatch",
+                   f"RRSIG at {name} is not algorithm 13 or 15")
     if sig.signer.canonicalize() != apex.canonicalize():
-        raise _err(422, "rrsig_key_mismatch", f"RRSIG at {name} signer is not the apex")
+        raise _err(422, "rrsig_key_mismatch",
+                   f"RRSIG at {name} signer is not the apex")
     if int(sig.labels) != len(name) - 1:
-        raise _err(422, "rrsig_key_mismatch", f"RRSIG at {name} has the wrong label count")
+        raise _err(422, "rrsig_key_mismatch",
+                   f"RRSIG at {name} has the wrong label count")
     if int(sig.original_ttl) != int(ttl):
-        raise _err(422, "rrsig_key_mismatch", f"RRSIG at {name} original TTL does not match the RRset")
+        raise _err(422, "rrsig_key_mismatch",
+                   f"RRSIG at {name} original TTL does not match the RRset")
     if (int(sig.algorithm), int(sig.key_tag)) not in keytags:
-        raise _err(422, "rrsig_key_mismatch", f"RRSIG at {name} key tag {sig.key_tag} matches no DNSKEY")
+        raise _err(422, "rrsig_key_mismatch",
+                   f"RRSIG at {name} key tag {sig.key_tag} matches no DNSKEY")
     inception = int(sig.inception)
     expiration = int(sig.expiration)
     if inception > now + settings.rrsig_inception_future_seconds:
-        raise _err(422, "rrsig_window", f"RRSIG at {name} inception is too far in the future")
+        raise _err(422, "rrsig_window",
+                   f"RRSIG at {name} inception is too far in the future")
     if expiration < now + settings.rrsig_min_remaining_seconds:
-        raise _err(422, "rrsig_window", f"RRSIG at {name} is not inside its validity window")
+        raise _err(422, "rrsig_window",
+                   f"RRSIG at {name} is not inside its validity window")
     if expiration - inception > settings.rrsig_max_lifetime_seconds:
-        raise _err(422, "rrsig_window", f"RRSIG at {name} lifetime exceeds the configured maximum")
+        raise _err(422, "rrsig_window",
+                   f"RRSIG at {name} lifetime exceeds the configured maximum")
     if expiration > now + settings.rrsig_max_lifetime_seconds + settings.rrsig_inception_future_seconds:
-        raise _err(422, "rrsig_window", f"RRSIG at {name} expires outside the configured policy")
+        raise _err(422, "rrsig_window",
+                   f"RRSIG at {name} expires outside the configured policy")
 
 
 def check_denial(zone: ParsedZone) -> None:
@@ -196,11 +235,13 @@ def check_denial(zone: ParsedZone) -> None:
             continue
         owners.setdefault(name, set()).add(rdtype)
     if nsec:
-        raise _err(422, "type_not_allowed", "plain NSEC zones are rejected; NSEC3 is required")
+        raise _err(422, "type_not_allowed",
+                   "plain NSEC zones are rejected; NSEC3 is required")
     param = zone.get(NSEC3PARAM)
     if param is not None or nsec3:
         if nsec3 and param is None:
-            raise _err(422, "bad_nsec3param", "NSEC3 records require NSEC3PARAM")
+            raise _err(422, "bad_nsec3param",
+                       "NSEC3 records require NSEC3PARAM")
         check_nsec3(zone.apex, owners, nsec3, param)
         return
     raise _err(422, "bad_nsec3param", "zone has no NSEC3PARAM")
@@ -212,7 +253,8 @@ def check_apex_ns(zone: ParsedZone, settings) -> None:
         raise _err(422, "apex_ns_incomplete", "apex NS RRset is missing")
     required = {name.canonicalize() for name in settings.service_ns}
     if not required <= have:
-        missing = sorted(name.to_text() for name in settings.service_ns if name.canonicalize() not in have)
+        missing = sorted(name.to_text() for name in settings.service_ns
+                         if name.canonicalize() not in have)
         raise _err(
             422,
             "apex_ns_incomplete",
@@ -225,7 +267,9 @@ def check_glue(zone: ParsedZone) -> None:
         if target != zone.apex and not target.is_subdomain(zone.apex):
             continue
         if zone.get(A, target) is None and zone.get(AAAA, target) is None:
-            raise _err(422, "glue_missing", f"in-bailiwick NS {target} has no A or AAAA in the zone")
+            raise _err(
+                422, "glue_missing",
+                f"in-bailiwick NS {target} has no A or AAAA in the zone")
 
 
 def offline_checks(zone: ParsedZone, settings, held_serial: int | None) -> int:
@@ -238,7 +282,8 @@ def offline_checks(zone: ParsedZone, settings, held_serial: int | None) -> int:
     check_apex_ns(zone, settings)
     check_glue(zone)
     if zone.apex == settings.catalog_zone:
-        raise _err(400, "bad_request", "the catalog zone name cannot be uploaded")
+        raise _err(400, "bad_request",
+                   "the catalog zone name cannot be uploaded")
     return serial
 
 
@@ -254,8 +299,10 @@ def parent_checks(zone: ParsedZone, settings, lookup) -> Delegation:
             "parent delegation NS does not include every service nameserver",
         )
     if parent_ns != apex_ns:
-        raise _err(422, "ns_set_mismatch", "parent delegation NS set does not equal the apex NS set")
-    if delegation.proved_ds_absent or delegation.ds_rrset is None or len(delegation.ds_rrset) == 0:
+        raise _err(422, "ns_set_mismatch",
+                   "parent delegation NS set does not equal the apex NS set")
+    if delegation.proved_ds_absent or delegation.ds_rrset is None or len(
+            delegation.ds_rrset) == 0:
         raise _err(403, "parent_ds_missing", "parent has no DS for this apex")
     return delegation
 
@@ -263,11 +310,12 @@ def parent_checks(zone: ParsedZone, settings, lookup) -> Delegation:
 def ds_matches(zone: ParsedZone, delegation: Delegation, settings) -> list:
     from dns_host.chain import _keys_matching_ds
 
-    matched = _keys_matching_ds(
-        zone.apex, zone.get(DNSKEY), list(delegation.ds_rrset), settings.ds_digest_types
-    )
+    matched = _keys_matching_ds(zone.apex, zone.get(DNSKEY),
+                                list(delegation.ds_rrset),
+                                settings.ds_digest_types)
     if not matched:
-        raise _err(403, "parent_ds_mismatch", "parent DS does not match a KSK in the uploaded zone")
+        raise _err(403, "parent_ds_mismatch",
+                   "parent DS does not match a KSK in the uploaded zone")
     return matched
 
 
@@ -295,7 +343,8 @@ def verify_signatures(zone: ParsedZone, matched_ksks, now: int) -> None:
                     now=float(now),
                 )
         if not saw_ksk_sig:
-            raise _err(422, "zone_validation_failed", "DNSKEY RRset is not signed by the DS-matched KSK")
+            raise _err(422, "zone_validation_failed",
+                       "DNSKEY RRset is not signed by the DS-matched KSK")
         for (name, rdtype), rrset in zone.rrsets.items():
             if rdtype == DNSKEY and name == zone.apex:
                 continue
@@ -310,10 +359,12 @@ def verify_signatures(zone: ParsedZone, matched_ksks, now: int) -> None:
     except ApiError:
         raise
     except Exception as exc:
-        raise _err(422, "zone_validation_failed", f"signature verification failed: {exc}") from exc
+        raise _err(422, "zone_validation_failed",
+                   f"signature verification failed: {exc}") from exc
 
 
 def next_expire_hint(zone: ParsedZone) -> str:
     expiries = zone.rrsig_expiries()
     earliest = min(expiries) if expiries else 0
-    return datetime.fromtimestamp(earliest, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(earliest,
+                                  timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

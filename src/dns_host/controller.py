@@ -207,26 +207,39 @@ def _document_from_wire(apex: str, wire: bytes) -> tuple[dict, int, int]:
                     continue
                 seen_soa = True
             type_name = dns.rdatatype.to_text(rrset.rdtype)
-            key = (rrset.name.to_text(), type_name)
-            encoded = [
-                base64.b64encode(rdata.to_wire()).decode("ascii")
-                for rdata in rrset
-            ]
-            bucket = grouped.get(key)
-            if bucket is None:
-                grouped[key] = {
-                    "name": rrset.name.to_text(),
-                    "type": type_name,
-                    "ttl": int(rrset.ttl),
-                    "wire": encoded,
-                }
+            if int(rrset.rdtype) == int(dns.rdatatype.RRSIG):
+                pieces = {}
+                for rdata in rrset:
+                    pieces.setdefault(int(rdata.type_covered),
+                                      []).append(rdata)
+                    expiries.append(int(rdata.expiration))
+                encoded_groups = [((rrset.name.to_text(), type_name, covered),
+                                   rdatas, int(rrset.ttl))
+                                  for covered, rdatas in pieces.items()]
             else:
+                encoded_groups = [((rrset.name.to_text(), type_name),
+                                   list(rrset), int(rrset.ttl))]
+            for key, rdatas, ttl in encoded_groups:
+                encoded = [
+                    base64.b64encode(rdata.to_wire()).decode("ascii")
+                    for rdata in rdatas
+                ]
+                bucket = grouped.get(key)
+                if bucket is None:
+                    grouped[key] = {
+                        "name": rrset.name.to_text(),
+                        "type": type_name,
+                        "ttl": ttl,
+                        "wire": encoded,
+                    }
+                    continue
+                if int(bucket["ttl"]) != ttl:
+                    raise ValueError(
+                        f"{rrset.name.to_text()} {type_name} has more than one TTL"
+                    )
                 for item in encoded:
                     if item not in bucket["wire"]:
                         bucket["wire"].append(item)
-            if int(rrset.rdtype) == int(dns.rdatatype.RRSIG):
-                for rdata in rrset:
-                    expiries.append(int(rdata.expiration))
     document = {
         "apex": apex,
         "rrsets": [grouped[key] for key in sorted(grouped)]
