@@ -81,43 +81,10 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/metrics")
     def metrics():
-        now = settings.now()
-        zones = store.list_zones()
-        failed = {}
-        with store._read() as conn:
-            rows = conn.execute("SELECT name, value FROM counters").fetchall()
-        counters = {row["name"]: int(row["value"]) for row in rows}
-        for key, value in list(counters.items()):
-            if key.startswith("upload_fail_"):
-                failed[key.removeprefix("upload_fail_")] = value
-        return jsonify({
-            "uploads_ok":
-            counters.get("upload_ok", 0),
-            "uploads_failed":
-            failed,
-            "axfr_ok":
-            counters.get("axfr_ok", 0),
-            "axfr_denied":
-            counters.get("axfr_denied", 0),
-            "notify_ok":
-            counters.get("notify_ok", 0),
-            "notify_fail":
-            counters.get("notify_fail", 0),
-            "zones_dropped":
-            counters.get("zones_dropped", 0),
-            "zones":
-            len(zones),
-            "zones_in_grace":
-            store.zones_in_grace(now),
-            "parent_lookup_ms_sum":
-            counters.get("parent_lookup_ms_sum", 0),
-            "parent_lookup_ms_count":
-            counters.get("parent_lookup_ms_count", 0),
-            "validate_ms_sum":
-            counters.get("validate_ms_sum", 0),
-            "validate_ms_count":
-            counters.get("validate_ms_count", 0),
-        })
+        from dns_host.nsd_metrics import PROMETHEUS_CONTENT_TYPE, render_metrics
+
+        body, status = render_metrics()
+        return body, status, {"Content-Type": PROMETHEUS_CONTENT_TYPE}
 
     @app.post("/v1/zones/<path:apex>")
     def upload(apex: str):
@@ -238,10 +205,6 @@ def create_app(settings: Settings | None = None,
     app.add_url_rule("/ext/config",
                      endpoint="ext_config",
                      view_func=service_config,
-                     methods=["GET"])
-    app.add_url_rule("/ext/metrics",
-                     endpoint="ext_metrics",
-                     view_func=metrics,
                      methods=["GET"])
     app.add_url_rule("/int/metrics",
                      endpoint="int_metrics",

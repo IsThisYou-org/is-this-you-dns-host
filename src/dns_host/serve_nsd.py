@@ -2,7 +2,8 @@
 
 NSD binds port 53 as root, then drops to the ``nsd`` user. State it must
 write after that drop lives under ``/opt/data/nsd``, which is chowned first.
-The pid file and control socket stay on the ``/run`` tmpfs.
+The pid file stays on the ``/run`` tmpfs. Remote control listens on
+127.0.0.1 only.
 """
 
 from __future__ import annotations

@@ -40,6 +40,10 @@ GUNICORN_BIND = "127.0.0.1:8000"
 HTTP_PORT = 80
 NSD_BIND = "0.0.0.0"
 NSD_PORT = 53
+# NSD statistics. Not on the public HTTP port.
+METRICS_PORT = 9100
+NSD_CONTROL_HOST = "127.0.0.1"
+NSD_CONTROL_PORT = 8952
 DATA_DIR = Path("/opt/data")
 TRUST_ANCHOR_FILE = Path("/app/deploy/root-anchors.ds")
 

@@ -41,6 +41,17 @@ def test_read_only_root_uses_dev_shm_and_an_explicit_gunicorn_socket():
     assert "tmpfs:" not in compose
 
 
+def test_port_80_does_not_route_metrics():
+    text = render(1048576, [])
+    blocks = text.split("\n    server {")[1:]
+    public = next(block for block in blocks if "listen 80;" in block)
+    metrics = next(block for block in blocks if "listen 9100;" in block)
+    assert "/metrics" not in public
+    assert "location = /metrics {" in metrics
+    assert "proxy_pass http://127.0.0.1:8000/int/metrics;" in metrics
+    assert "listen 127.0.0.1:9100;" not in text
+
+
 def test_nginx_without_trusted_proxies_does_not_rewrite_addresses():
     text = render(100, [])
     assert "\n        set_real_ip_from " not in text

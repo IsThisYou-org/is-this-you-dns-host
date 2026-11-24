@@ -11,7 +11,15 @@ import os
 import subprocess
 from pathlib import Path
 
-from dns_host.config import DNS_BIND, DNS_PORT, NSD_BIND, NSD_PORT, data_dir
+from dns_host.config import (
+    DNS_BIND,
+    DNS_PORT,
+    NSD_BIND,
+    NSD_CONTROL_HOST,
+    NSD_CONTROL_PORT,
+    NSD_PORT,
+    data_dir,
+)
 from dns_host.zonesync import atomic_write
 
 
@@ -57,7 +65,8 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
         "",
         "remote-control:",
         "    control-enable: yes",
-        "    control-interface: /run/nsd/nsd.control",
+        f"    control-interface: {NSD_CONTROL_HOST}",
+        f"    control-port: {int(NSD_CONTROL_PORT)}",
         f'    server-key-file: "{data_dir() / "nsd" / "nsd_server.key"}"',
         f'    server-cert-file: "{data_dir() / "nsd" / "nsd_server.pem"}"',
         f'    control-key-file: "{data_dir() / "nsd" / "nsd_control.key"}"',
