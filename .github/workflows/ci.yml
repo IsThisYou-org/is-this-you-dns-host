@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: docker build -t dns-host:ci .
+        run: date +%Y%m%d.%H%M > build.txt && docker build -t dns-host:ci .
       - name: Start read-only and check the daemons
         run: |
           set -eu
