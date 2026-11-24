@@ -1,0 +1,8 @@
+#! /bin/sh
+
+time ./tools/zone_push.py \
+	--axfr-zone james.isthisyou.me \
+	--dns-server 127.0.0.8 \
+	--axfr-server 192.168.1.145 \
+	--axfr-port 53 \
+	--base-url http://127.0.0.8/
