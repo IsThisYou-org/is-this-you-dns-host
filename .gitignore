@@ -33,3 +33,4 @@ deploy/easy-nginx/pems/*.pem
 .vscode/
 *.swp
 .DS_Store
+build.txt
