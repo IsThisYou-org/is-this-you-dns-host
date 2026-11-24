@@ -1,4 +1,4 @@
-"""FNV shard layout, startup migration, and explicit NSD zonefile paths."""
+"""FNV shard layout for the hidden primary, and NSD's catalog zonefiles."""
 
 from pathlib import Path
 
@@ -12,8 +12,8 @@ from dns_host.shard import (
     fnv1a_32,
     fnv_16,
     migrate_data_dirs,
+    discard_nsd_fnv_zonefiles,
     migrate_flat_zone_files,
-    relative_zonefile,
     zone_file_name,
     zone_path,
 )
@@ -30,26 +30,22 @@ def test_fnv_vectors_and_james_shard():
     assert fnv_16("James.IsThisYou.Me.") == 0x2F92
     filename = zone_file_name("james.isthisyou.me.", ".axfr")
     assert filename == "james.isthisyou.me.axfr"
-    path = zone_path(Path("/opt/data/nsd/zones"), "james.isthisyou.me",
-                     filename)
-    assert path == Path("/opt/data/nsd/zones/2f/92/james.isthisyou.me.axfr")
-    assert relative_zonefile("james.isthisyou.me.") == (
-        "2f/92/james.isthisyou.me.axfr")
+    path = zone_path(Path("/opt/data/zones"), "james.isthisyou.me", filename)
+    assert path == Path("/opt/data/zones/2f/92/james.isthisyou.me.axfr")
 
 
-def test_render_nsd_emits_explicit_zonefile_paths():
+def test_render_nsd_lists_only_the_catalog_zone():
     settings = Settings(
         catalog_zone=dns.name.from_text("catalog.example.net."))
-    text = render_nsd(settings, ["catalog.example.net.", "user.example."])
-    assert 'zonefile: "86/3d/catalog.example.net.axfr"' in text
-    assert 'zonefile: "c6/3c/user.example.axfr"' in text
-    assert 'name: "user.example"' in text
-    assert 'include-pattern: "catalog-member"' in text
-    assert text.count("\nzone:") == 2
+    text = render_nsd(settings)
+    assert 'zonefile: "%1/%2/%s.zone"' in text
+    assert 'zonefile: "catalog.zone"' in text
+    assert 'name: "catalog.example.net"' in text
+    assert "user.example" not in text
+    assert 'catalog-member-pattern: "catalog-member"' in text
+    assert text.count("\nzone:") == 1
     assert "zonefiles-write: 60" in text
     assert 'zonesdir: "/opt/data/nsd/zones"' in text
-    assert "%1" not in text
-    assert "%s" not in text
 
 
 def test_migrate_flat_files_is_idempotent(tmp_path, capsys):
@@ -103,34 +99,40 @@ def test_migrate_keeps_matching_shard_and_leaves_a_conflict(tmp_path, capsys):
     assert "differs from shard copy" in capsys.readouterr().out
 
 
-def test_nsd_bare_zone_file_is_moved_to_axfr_name(tmp_path):
+def test_old_nsd_hash_copies_are_deleted(tmp_path, capsys):
+    set_log_level("info")
     zones = tmp_path / "nsd" / "zones"
-    zones.mkdir(parents=True)
-    (zones / "james.isthisyou.me").write_bytes(b"zone")
-    (zones / "other.example.zone").write_bytes(b"zone2")
-    assert migrate_flat_zone_files(zones, bare_as_axfr=True) == 2
-    assert (zones / "2f" / "92" /
-            "james.isthisyou.me.axfr").read_bytes() == b"zone"
-    other = zone_path(zones, "other.example", "other.example.axfr")
-    assert other.read_bytes() == b"zone2"
-    assert not (zones / "james.isthisyou.me").exists()
+    old = zones / "2f" / "92"
+    old.mkdir(parents=True)
+    (old / "james.isthisyou.me.axfr").write_bytes(b"stale")
+    kept = zones / "j" / "a"
+    kept.mkdir(parents=True)
+    (kept / "james.isthisyou.me.zone").write_bytes(b"new")
+    (zones / "catalog.zone").write_bytes(b"catalog")
+    assert discard_nsd_fnv_zonefiles(zones) == 1
+    assert not old.exists()
+    assert (kept / "james.isthisyou.me.zone").read_bytes() == b"new"
+    assert (zones / "catalog.zone").read_bytes() == b"catalog"
+    assert "deleted NSD zone file from the hash layout" in capsys.readouterr(
+    ).out
+    assert discard_nsd_fnv_zonefiles(zones) == 0
 
 
-def test_migrate_data_dirs_covers_zones_and_nsd(tmp_path):
+def test_migrate_data_dirs_shards_zones_and_drops_nsd_hash_copies(tmp_path):
     (tmp_path / "zones").mkdir()
     (tmp_path / "zones" / "user.example.axfr").write_bytes(b"a")
     nsd_zones = tmp_path / "nsd" / "zones"
-    nsd_zones.mkdir(parents=True)
-    (nsd_zones / "user.example").write_bytes(b"b")
+    old = nsd_zones / "c6" / "3c"
+    old.mkdir(parents=True)
+    (old / "user.example.axfr").write_bytes(b"b")
     xfr = tmp_path / "nsd" / "xfr"
     xfr.mkdir(parents=True)
     (xfr / "user.example.axfr").write_bytes(b"c")
-    (xfr / "nsd-xfr-1").mkdir()
-    assert migrate_data_dirs(tmp_path) == 3
+    assert migrate_data_dirs(tmp_path) == 2
     assert (tmp_path / "zones" / "c6" / "3c" /
             "user.example.axfr").read_bytes() == b"a"
-    assert (nsd_zones / "c6" / "3c" / "user.example.axfr").read_bytes() == b"b"
-    assert (xfr / "c6" / "3c" / "user.example.axfr").read_bytes() == b"c"
+    assert not (nsd_zones / "c6").exists()
+    assert (xfr / "user.example.axfr").read_bytes() == b"c"
     assert migrate_data_dirs(tmp_path) == 0
 
 
@@ -157,11 +159,7 @@ def test_controller_install_and_delete_use_the_shard(tmp_path, monkeypatch):
     assert not (tmp_path / "zones" / "james.isthisyou.me.axfr").exists()
     document = tmp_path / "zones" / "2f" / "92" / "james.isthisyou.me.json"
     assert document.is_file()
-    conf = (tmp_path / "nsd" / "nsd.conf").read_text(encoding="utf-8")
-    assert 'zonefile: "2f/92/james.isthisyou.me.axfr"' in conf
-    assert "zonefiles-write: 60" in conf
-    assert (tmp_path / "nsd" / "zones" / "2f" / "92").is_dir()
-    assert "%1" not in conf
+    assert not (tmp_path / "nsd" / "nsd.conf").exists()
 
     flat = tmp_path / "zones" / "james.isthisyou.me.axfr"
     flat.write_bytes(b"stale")
@@ -178,6 +176,10 @@ def test_readme_and_cron_document_the_layout():
     assert "0x2f92" in readme
     assert "2f/92/" in readme
     assert "FNV-1a" in readme
+    assert 'zonefile: "%1/%2/%s.zone"' in readme or "%1/%2/%s.zone" in readme
+    assert "catalog.zone" in readme
+    assert "create_dirs" in readme
+    assert "a.example" in readme
     assert "zonefiles-write: 60" in readme
     assert "127.0.0.1:5353" in readme
     assert "(hash >> 16) ^ (hash & 0xFFFF)" in readme

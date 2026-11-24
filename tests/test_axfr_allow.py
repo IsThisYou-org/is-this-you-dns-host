@@ -94,7 +94,7 @@ def test_provide_xfr_includes_axfr_allow_and_notify_does_not():
         axfr_allow=["203.0.113.9/24", "2001:db8::1", "198.51.100.8"],
         catalog_zone=dns.name.from_text("catalog.example.net."),
     )
-    text = render_nsd(settings, ["catalog.example.net.", "user.example."])
+    text = render_nsd(settings)
     provide = _acl(text, "provide-xfr")
     notify = _acl(text, "notify")
     assert provide.count("192.0.2.10 one.example.") == 2

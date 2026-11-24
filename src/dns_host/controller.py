@@ -44,7 +44,6 @@ class Controller:
         self.notifier = notifier
         self.catalog = Catalog(settings)
         self._spool_mtime = None
-        self._nsd_members: tuple | None = None
 
     @property
     def spool_dir(self) -> Path:
@@ -80,9 +79,6 @@ class Controller:
             changed = True
         if not changed:
             return []
-        # Publish explicit zonefile paths before the catalog file changes,
-        # so a reload lands before NOTIFY makes NSD read the new catalog.
-        self._sync_nsd()
         self.catalog.save(self.settings.now())
         self._write_catalog_wire()
         messages = plan_notifies(self.settings, before, self.catalog)
@@ -98,7 +94,6 @@ class Controller:
         if not had and sql_serial is None:
             return None
         if had:
-            self._sync_nsd()
             self.catalog.save(now)
             self._write_catalog_wire()
         return self.catalog.serial
@@ -182,22 +177,6 @@ class Controller:
                 apex=apex,
                 reason="rrsig grace elapsed")
         return True
-
-    def _sync_nsd(self) -> None:
-        from dns_host.nsdconf import reload_nsd, write_nsd_config
-        from dns_host.shard import canonical_zone
-
-        names = tuple(
-            sorted(
-                canonical_zone(apex) for apex in self.catalog.member_names()))
-        if names == self._nsd_members:
-            return
-        write_nsd_config(
-            self.settings,
-            [self.settings.catalog_zone.to_text(), *names],
-        )
-        reload_nsd()
-        self._nsd_members = names
 
     def _write_catalog_wire(self) -> None:
         blob = catalog_tcp_bytes(self.settings, self.catalog.serial,

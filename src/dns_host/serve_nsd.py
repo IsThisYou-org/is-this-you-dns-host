@@ -12,10 +12,9 @@ import os
 import pwd
 from pathlib import Path
 
-from dns_host.catalogfile import Catalog
 from dns_host.config import Settings, log_effective
 from dns_host.nsdconf import ensure_control_keys, nsd_conf_path, write_nsd_config
-from dns_host.shard import migrate_flat_zone_files
+from dns_host.shard import discard_nsd_fnv_zonefiles
 
 
 def _chown_tree(directory: Path, user: str) -> None:
@@ -37,14 +36,11 @@ def main() -> None:
     xfr = directory / "xfr"
     zones.mkdir(parents=True, exist_ok=True)
     xfr.mkdir(parents=True, exist_ok=True)
-    migrate_flat_zone_files(zones, bare_as_axfr=True)
-    migrate_flat_zone_files(xfr)
+    # Drop hash-layout copies. NSD transfers those zones once into %1/%2.
+    discard_nsd_fnv_zonefiles(zones)
     runtime = Path("/run/nsd")
     runtime.mkdir(parents=True, exist_ok=True)
-    catalog = Catalog(settings)
-    catalog.load()
-    write_nsd_config(
-        settings, [settings.catalog_zone.to_text(), *catalog.member_names()])
+    write_nsd_config(settings)
     ensure_control_keys(directory)
     _chown_tree(directory, "nsd")
     _chown_tree(runtime, "nsd")

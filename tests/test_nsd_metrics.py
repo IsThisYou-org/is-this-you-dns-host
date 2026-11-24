@@ -125,7 +125,7 @@ def test_render_metrics_status(monkeypatch):
 def test_remote_control_listens_on_localhost_only():
     settings = Settings(
         catalog_zone=dns.name.from_text("catalog.example.net."))
-    text = render_nsd(settings, [])
+    text = render_nsd(settings)
     assert "control-enable: yes" in text
     assert "control-interface: 127.0.0.1" in text
     assert "control-port: 8952" in text
