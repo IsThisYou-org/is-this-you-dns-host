@@ -1,2 +1,225 @@
-# is-this-you-dns-host
-DNS Hosting Service for is-this-you
+# Is this you? — DNS hosting service
+
+Account-less hidden primary for DNSSEC-signed zones. Anyone may upload a zone. It is accepted only when the zone validates, the parent DS matches a KSK in the zone, the parent NS set equals the apex NS set, and that set includes every nameserver of this deployment. The service never holds zone-signing keys.
+
+NSD is the only public DNS server. Internally, four supervised processes share `/opt/data`: the upload API, a zone-master controller, a UDP SOA/NOTIFY service, and a pre-fork TCP AXFR service. NSD transfers a single RFC 9432 catalog zone from the local AXFR service and learns user zones from that catalog. Its configuration is not rewritten when a zone is added.
+
+This repository is MIT licensed.
+
+## Run it
+
+The image is Alpine 3.24. Compose sets `read_only: true`. Persistent data is the `/opt/data` volume. `/run` and `/tmp` are symlinks to `/dev/shm`, and `shm_size` sizes that tmpfs. There are no other tmpfs mounts. Copy the example config if you want different nameservers; Compose bind-mounts it at `/opt/data/etc/config.yaml`.
+
+```sh
+docker compose up --build
+```
+
+`docker compose up` does not publish TLS. Put a reverse proxy in front if you want HTTPS. `docker-compose.tls.yml` adds the owner's [easy-nginx](https://github.com/james-stevens/easy-nginx) image (`jamesstevens/easy-nginx`, MIT) as that proxy. Use `deploy/config.tls.yaml` so `trusted_proxies` is the compose network of the terminator:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+```
+
+Place a PEM containing both the certificate and the private key at `deploy/easy-nginx/pems/upload.pem`, and set the public name in `deploy/easy-nginx/etc/nginx.input`. Port 80 on the terminator redirects to HTTPS. The service itself speaks plain HTTP only.
+
+### Ports
+
+| Port | Bind | Process | Published |
+| --- | --- | --- | --- |
+| 53/udp, 53/tcp | `0.0.0.0` | NSD, the public relay | yes |
+| 80/tcp | `0.0.0.0` | nginx external listener (`/api/` is the `/ext/` tree) | yes |
+| 5353/udp | `127.0.0.1` | UDP service: SOA answers and NOTIFY. Not published. | no |
+| 5353/tcp | `127.0.0.1` | Pre-fork AXFR service (default 5 children). IXFR is not requested. | no |
+| 8081/tcp | `127.0.0.1` | nginx internal listener (`/api/` is the `/int/` tree) | no |
+| 8000/tcp | `127.0.0.1` | gunicorn | no |
+
+Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
+
+NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx temp files are under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
+
+### Layout
+
+| Path | Contents |
+| --- | --- |
+| `/opt/data/etc/config.yaml` | Operator configuration. A missing file is empty configuration. |
+| `/opt/data/spool` | Validated AXFR payloads. `tmp/` holds the file before `rename`. |
+| `/opt/data/zones` | Installed zone wire, written by the controller |
+| `/opt/data/catalog` | Catalog file (zone names and full SOA records) and its mtime, which is the catalog SOA serial |
+| `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones |
+| `/opt/data/log` | Syslog output |
+| `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
+| `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the NSD control socket, nginx temp files |
+
+### HTTP
+
+nginx presents each application tree as `/api/` on its own listener.
+
+* External, port 80: `GET /health`, `GET /metrics`, `POST /api/v1/zones/{apex}`, and the same paths under `/ext/` on gunicorn.
+* Internal, `127.0.0.1:8081`: `POST /api/zones/drop` and `POST /api/zones/parent-state` (gunicorn paths `/int/zones/...`). Expire and delete are not on the public listener.
+
+`/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. `/metrics` reports upload, lookup, AXFR, NOTIFY and grace counters.
+
+## Configuration
+
+`/opt/data/etc/config.yaml` is the configuration. Environment variables are not read. TSIG secrets may be inline or in `tsig_secret_file` (a Docker secret mount is a normal place). They are never taken from a zone upload.
+
+| Key | Default | Role |
+| --- | --- | --- |
+| `service_ns` | unset; the process refuses to start | Public nameservers. All of them must appear in the apex NS and in the parent delegation. |
+| `secondaries` | empty | IP, optional port, optional TSIG. NSD `provide-xfr` and `notify` are generated from this list. |
+| `resolver_base_url` | `https://api.isthisyou.org/` | DoH JSON resolver for parent lookups. |
+| `catalog_zone` | `catalog.example.net.` | Catalog zone apex (RFC 9432). |
+| `trusted_proxies` | empty | CIDRs allowed to supply `X-Forwarded-For` / `X-Forwarded-Proto` on the external listener. |
+| `trust_anchor_file` | image copy of the IANA root DS set | DS records for the ICANN root. |
+| `grace_days` | `90` | How long to keep serving after RRSIG expiry or parent DS/NS drift. |
+| `max_body_bytes` / `max_rrsets` / `max_names` / `max_rdata_bytes` | 1 MiB / 2000 / 1000 / 4096 | Upload and rdata caps. |
+
+The example file lists the rate limits, the serial window, and the DS digest list. `handshake_root_servers` and `handshake_trust_anchor_file` together enable a second walk when the name is proved absent from the ICANN root.
+
+Secondaries are one list. Each entry is an IP, an optional port, and an optional TSIG key name, secret (or `tsig_secret_file`), and algorithm. The generated NSD pattern emits `provide-xfr` and `notify` for those addresses only.
+
+## Try an upload
+
+The phone builds and signs the zone. For a dry run on a workstation:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=src python3 -m dns_host.demo_zone \
+  --apex user.example. \
+  --service-ns ns1.example.net.,ns2.example.net. \
+  > /tmp/zone.json
+```
+
+The command writes the upload JSON to stdout and the KSK DS to stderr. Before the first upload can succeed, the parent zone must already delegate to every `service_ns` name and publish that DS. A missing DS is the kill switch: new uploads fail, and the stored zone is dropped after `grace_days`.
+
+```sh
+curl -sS -X POST "http://127.0.0.1/api/v1/zones/user.example" \
+  -H "content-type: application/json" \
+  --data-binary @/tmp/zone.json
+```
+
+A success body is `{"apex", "serial", "catalogUpdated", "nextExpireHint"}`. `nextExpireHint` is the earliest RRSIG expiration. The first accept is HTTP 201; a later higher serial is HTTP 200.
+
+The sample zone will not pass against the public resolver unless `user.example` is really delegated to this host. Point `resolver_base_url` at your own copy of the same DoH JSON API, or run the test suite, which signs a zone and answers the parent walk itself.
+
+### Upload body
+
+```json
+{
+  "kind": "dnsauth#signedZone",
+  "apex": "user.example.",
+  "rrsets": [
+    {
+      "kind": "dns#resourceRecordSet",
+      "name": "user.example.",
+      "type": "SOA",
+      "ttl": 300,
+      "rrdatas": ["ns1.example.net. hostmaster.user.example. 1731000000 3600 600 864000 300"]
+    }
+  ]
+}
+```
+
+Names are stored absolute, lowercased, with one trailing dot. Unicode labels are converted with IDNA. A missing trailing dot is added; it does not make the name relative to the apex, so send `www.user.example.` and not `www`. Names inside rdata follow zone-file rules: no trailing dot means relative to the apex. Wildcards are rejected. Labels may contain underscore (`_auth`).
+
+SOA serial is unix time. It must be greater than the serial already stored, not more than 5 minutes ahead of the service clock, and not older than one hour.
+
+User zones are NSEC3 as in RFC 9276: iterations 0, empty salt, Opt-Out off. Plain NSEC zones are rejected. DNSKEY algorithm 13 or 15 (P-256 or Ed25519), with a flags-257 KSK. RRSIG lifetime is at most 30 days and the signature must be valid now. Current standard RR types plus WALLET (IANA type 262) are accepted when they validate. Obsolete, experimental, and private-use types (NULL, HINFO, MD, MF, MB, private-use numbers, and the like) are rejected before signature checks. `URI` and `WALLET` are accepted only at the zone apex. Each WALLET rdata is either two character-strings (type, identifier) or four (type, identifier, description, sort order). If the installed dnspython has no WALLET class, the same rdata is stored as RFC 3597 unknown-type wire.
+
+### What the service checks, in order
+
+Body size, then the per-IP upload rate, then JSON. After that, still offline: RRset, name, and rdata caps, owner names, one apex SOA, serial freshness, type policy, TTL bounds, DNSKEY, RRSIG metadata, the NSEC3 chain, apex NS contains every `service_ns`, and in-bailiwick NS names have A or AAAA glue. Glue is checked before any parent query because it does not need the parent.
+
+Only then does the service spend a parent-lookup token. Failed parent results are cached per apex for `negative_cache_ttl_seconds` and a retry in that window does not query again. The walk uses the DoH JSON resolver and only these parameters: `name`, `type`, `do=1`, `rd=0`, `server=<parent NS>`, `cd`. `do=1` answers are read from base64 `rdata`. The resolver's AD bit is not trusted.
+
+The parent NS name set must equal the apex NS set. If the parent is missing a service NS the error is `parent_ns_incomplete` (403). Any other difference is `ns_set_mismatch` (422). The DS digest is compared to the uploaded KSK before any signature in the upload is verified. Signature verification is last.
+
+On success the API writes wire-format AXFR data into the spool (an empty `mktemp` file in `/opt/data/spool`, the bytes under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs the zone and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. NSD is not reloaded.
+
+## Processes
+
+| Process | How it runs | Role |
+| --- | --- | --- |
+| REST API | gunicorn, `GUNICORN_WORKERS` (default 3) | Admission and DNSSEC validation, unchanged. Caches DNSKEYs already validated to the ICANN or Handshake root. Spools wire, not JSON. |
+| Zone controller | one process | Polls the spool, ignores empty files, directories and hidden names, re-checks the SOA serial, installs the zone, ages out zones expired for more than 90 days. |
+| DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
+| DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
+| NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). |
+| cron | busybox `crond` | Deletes empty spool files and orphaned `tmp` files older than five minutes. |
+
+## Secondaries
+
+NOTIFY is UDP, from the UDP service: the catalog first when its serial changes, then each new or updated member. NSD's `provide-xfr` and `notify` lines are generated from the one secondary list, on the catalog zone and on the member pattern. NSD itself requests only AXFR (`request-xfr: AXFR`) from `127.0.0.1:5353`. Public AXFR is answered by NSD, not by the hidden TCP service. A bad TSIG on NSD's side is refused. Set `axfr_require_tsig: true` on the secondaries' keys when you want TSIG as well as the address.
+
+The catalog is schema version 2 (`version.<catalog> TXT "2"`, member PTRs at `<label>.zones.<catalog>`). It is not signed. The tests speak AXFR with dnspython. NSD on port 53 is what a real secondary talks to.
+
+The 90-day clear-out runs in the zone controller. Removing a zone updates the catalog; the UDP service notifies the catalog only.
+
+## Push a zone you signed yourself
+
+`tools/zone_push.py` is a maintainer utility. It is not copied into the container image. It does not sign zones and it does not change admission: the service still accepts only a full-zone `POST /api/v1/zones/{apex}` with `dnsauth#signedZone` JSON. The tool turns a master file, or an AXFR, into that JSON and sends it. A later file with a higher SOA serial is just another POST.
+
+Install dnspython with the development requirements, then:
+
+```sh
+pip install -r requirements-dev.txt
+
+# Print the JSON and do not contact the service. Stdout is only the document.
+python3 tools/zone_push.py --zone-file /tmp/user.example.zone --dry-run
+
+# POST it. The status and the service's JSON body are printed.
+python3 tools/zone_push.py \
+  --zone-file /tmp/user.example.zone \
+  --base-url http://127.0.0.1:80
+
+# Take the zone from an AXFR, then ask NSD whether the SOA serial matches.
+python3 tools/zone_push.py \
+  --axfr-zone user.example. \
+  --axfr-server 192.0.2.53 \
+  --axfr-port 53 \
+  --tsig-key-name transfer.example. \
+  --tsig-secret 'BASE64SECRET' \
+  --base-url http://127.0.0.1:80 \
+  --verify \
+  --dns-server 127.0.0.1 \
+  --dns-port 53
+```
+
+If the master file has no `$ORIGIN`, pass `--apex user.example.`. `--dry-run` writes a `request_id` on stderr so stdout stays valid JSON. A failed admission check is a non-zero exit and the HTTP status plus the JSON error body on stdout.
+
+## Tests
+
+```sh
+pip install -r requirements-dev.txt
+python3 -m pytest
+```
+
+The tests generate and sign fixture zones (algorithm 13 and 15, NSEC3). They do not use the network. GitHub Actions runs the tests, ruff (pyflakes), and a read-only container boot that checks HTTP, the public DNS port, and an empty `docker diff`.
+
+Dev dependencies are pip-installed on the workstation and in CI. The image does not use pip: Alpine 3.24 supplies `py3-flask`, `py3-gunicorn`, `py3-dnspython`, `py3-cryptography`, and `py3-yaml`.
+
+## Decisions
+
+* **Secondary in CI.** dnspython performs AXFR in the tests. The container runs NSD as the relay. No Knot or BIND container.
+* **Limits.** 1 MiB body, 2000 RRsets, 1000 names, 4096-byte rdata, 30 uploads per IP per minute, 15 parent lookups per IP per minute.
+* **Extra parent NS names.** The apex NS set and the parent delegation must be equal, and both must include every `service_ns`. An extra name at the parent fails `ns_set_mismatch` unless the apex has it too.
+* **DS digests.** SHA-256 only, unless `ds_digest_types` lists more (1 = SHA-1, 4 = SHA-384).
+* **Remaining RRSIG lifetime.** A signature only has to be valid now (`rrsig_min_remaining_seconds` defaults to 0). Lifetime is at most 30 days.
+* **Negative cache.** 60 seconds, one entry per apex (the latest parent-check failure).
+* **Apex text.** Trim, IDNA, lowercase, one trailing dot. The URL apex and the JSON apex must match after that.
+* **Glue.** `glue_missing` is returned before a parent query.
+* **Handshake.** Off unless both handshake settings are provided.
+* **Parent chain failures** that are not a clean DS or NS answer use `parent_chain_invalid` (403). Transport failure is `parent_lookup_unavailable` (503). A resolver outage does not start the drift clock.
+* **Drop.** Removing a zone notifies the catalog only.
+* **SOA** on the master is for NSD and for polling. Public clients use NSD.
+
+## Not in this MVP
+
+* IXFR from the Python master (NOTIMP). NSD falls back to AXFR.
+* More than one hidden primary.
+* A bundled secondary beside NSD.
+* Re-checking individual RRsets against the previous zone (the serial is the replay control).
+* The phone app, enrolment, and JWS verification.
+* TLS on this container.
