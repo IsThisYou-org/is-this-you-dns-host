@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 mkdir -p /opt/data/log /opt/data/spool/tmp
-exec crond -f -c /etc/crontabs -L /opt/data/log/cron.log
+exec crond -f -S -c /etc/crontabs

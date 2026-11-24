@@ -98,14 +98,6 @@ def zone_path(directory: Path, apex: str, filename: str) -> Path:
     return Path(directory) / high / low / filename
 
 
-def relative_zonefile(apex: str, suffix: str = ".axfr") -> str:
-    """Zonefile path relative to an NSD ``zonesdir``."""
-
-    filename = zone_file_name(apex, suffix)
-    path = zone_path(Path("/zone-root"), apex, filename)
-    return path.relative_to("/zone-root").as_posix()
-
-
 def locate_zone_file(directory: Path, apex: str, filename: str) -> Path | None:
     """Sharded path when that file exists, otherwise a legacy flat file."""
 
@@ -147,15 +139,11 @@ def iter_zone_files(directory: Path, suffix: str | None = None):
                     yield child
 
 
-def migrate_flat_zone_files(directory: Path,
-                            *,
-                            bare_as_axfr: bool = False) -> int:
+def migrate_flat_zone_files(directory: Path) -> int:
     """Move flat per-zone files into ``hh/ll/``. Repeat runs move nothing.
 
-    ``bare_as_axfr`` is for NSD's zones directory, where a file named only
-    with the zone (or ``*.zone``) is stored as ``<zone>.axfr``. Each move
-    is logged at info. A shard copy that already matches is kept and the
-    flat file is removed. A shard copy that differs is left untouched.
+    Each move is logged at info. A shard copy that already matches is kept
+    and the flat file is removed. A shard copy that differs is left untouched.
     """
 
     directory = Path(directory)
@@ -165,7 +153,7 @@ def migrate_flat_zone_files(directory: Path,
     for entry in list(_top_entries(directory)):
         if not entry.is_file():
             continue
-        planned = _migration_target(entry.name, bare_as_axfr=bare_as_axfr)
+        planned = _migration_target(entry.name)
         if planned is None:
             continue
         zone, filename = planned
@@ -177,15 +165,56 @@ def migrate_flat_zone_files(directory: Path,
     return moved
 
 
+def discard_nsd_fnv_zonefiles(directory: Path) -> int:
+    """Delete hash-layout NSD copies so NSD transfers them once more.
+
+    The old files are ``<hh>/<ll>/<name>.axfr`` with two hex digits in each
+    directory. NSD now writes ``%1/%2/%s.zone``, whose directories are one
+    character. Removing the ``.axfr`` files is enough: the next start loads
+    nothing for that zone and AXFRs it, then writes the new path. A second
+    run finds nothing to delete.
+    """
+
+    directory = Path(directory)
+    if not directory.is_dir():
+        return 0
+    removed = 0
+    for high in list(_top_entries(directory)):
+        if not high.is_dir() or not _HEX2.fullmatch(high.name):
+            continue
+        for low in list(_top_entries(high)):
+            if not low.is_dir() or not _HEX2.fullmatch(low.name):
+                continue
+            for child in list(_top_entries(low)):
+                if not child.is_file() or not child.name.endswith(".axfr"):
+                    continue
+                if child.name.startswith("."):
+                    continue
+                try:
+                    child.unlink()
+                except OSError as exc:
+                    log("warning",
+                        "NSD hash-layout zone file left in place",
+                        path=str(child),
+                        error=str(exc))
+                    continue
+                log("info",
+                    "deleted NSD zone file from the hash layout",
+                    path=str(child))
+                removed += 1
+            _rmdir_if_empty(low)
+        _rmdir_if_empty(high)
+    return removed
+
+
 def migrate_data_dirs(root: Path | None = None) -> int:
-    """Migrate every per-zone directory under the data dir. Idempotent."""
+    """Shard ``zones/`` and drop old NSD hash-layout copies. Idempotent."""
 
     from dns_host.config import data_dir
 
     base = Path(root) if root is not None else data_dir()
     moved = migrate_flat_zone_files(base / "zones")
-    moved += migrate_flat_zone_files(base / "nsd" / "zones", bare_as_axfr=True)
-    moved += migrate_flat_zone_files(base / "nsd" / "xfr")
+    moved += discard_nsd_fnv_zonefiles(base / "nsd" / "zones")
     return moved
 
 
@@ -217,27 +246,25 @@ def _suffix_of(filename: str) -> str:
     return ""
 
 
-def _migration_target(filename: str, *,
-                      bare_as_axfr: bool) -> tuple[str, str] | None:
+def _rmdir_if_empty(directory: Path) -> None:
+    try:
+        directory.rmdir()
+    except OSError:
+        return
+
+
+def _migration_target(filename: str) -> tuple[str, str] | None:
     if (not filename or filename.startswith(".") or filename in _KEEP
             or filename.startswith("xfr.") or filename.startswith("nsd-xfr")):
         return None
     suffix = _suffix_of(filename)
-    if suffix:
-        base = filename[:-len(suffix)]
-    elif bare_as_axfr and "." in filename:
-        base = filename
-        suffix = ""
-    else:
+    if not suffix:
         return None
+    base = filename[:-len(suffix)]
     try:
         zone = canonical_zone(base)
         zone_file_name(zone, ".axfr")
     except ValueError:
-        return None
-    if bare_as_axfr and suffix in {"", ".zone", ".axfr"}:
-        suffix = ".axfr"
-    if not suffix:
         return None
     return zone, zone + suffix.lower()
 

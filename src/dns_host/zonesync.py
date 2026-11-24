@@ -104,31 +104,12 @@ class ZoneIndex:
         except Exception:
             # Leave the previous snapshot in place and retry on the next poll.
             return False
-        changed = serials != self.serials or int(
-            data.get("catalog_serial") or 0) != self.catalog_serial
         self.zones = zones
         self.serials = serials
         self.catalog_serial = int(data.get("catalog_serial") or 0)
         self._mtime = mtime
         self.loaded = True
-        if changed:
-            self.write_nsd()
         return True
 
     def member_names(self) -> list[str]:
         return sorted(self.serials)
-
-    def write_nsd(self) -> None:
-        from dns_host.nsdconf import write_nsd_config
-
-        write_nsd_config(self.settings,
-                         nsd_zone_names(self.settings, self.serials))
-
-
-def nsd_zone_names(settings, serials: dict) -> list[str]:
-    catalog = settings.catalog_zone.to_text()
-    names = [catalog]
-    for apex in sorted(serials):
-        if apex != catalog:
-            names.append(apex)
-    return names

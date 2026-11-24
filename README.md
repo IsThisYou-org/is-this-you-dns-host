@@ -2,7 +2,7 @@
 
 Account-less hidden primary for DNSSEC-signed zones. Anyone may upload a zone. It is accepted only when the zone validates, the parent DS matches a KSK in the zone, the parent NS set equals the apex NS set, and that set includes every nameserver of this deployment. The service never holds zone-signing keys.
 
-NSD is the only public DNS server. Internally, four supervised processes share `/opt/data`: the upload API, a zone-master controller, a UDP SOA/NOTIFY service, and a pre-fork TCP AXFR service. NSD transfers a single RFC 9432 catalog zone from the local AXFR service. Each member zone is also listed in `nsd.conf` with an explicit sharded `zonefile` path. `nsd.conf` is rewritten and NSD is reloaded when that set changes.
+NSD is the only public DNS server. Internally, four supervised processes share `/opt/data`: the upload API, a zone-master controller, a UDP SOA/NOTIFY service, and a pre-fork TCP AXFR service. NSD transfers a single RFC 9432 catalog zone from the local AXFR service and learns member zones only from that catalog. `nsd.conf` lists the catalog zone and the member pattern. It is not rewritten when a zone is added.
 
 This repository is MIT licensed.
 
@@ -46,14 +46,14 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | `/opt/data/spool` | Validated AXFR payloads, one uniquely named job per upload. `tmp/` holds the file before `rename`. Not sharded. |
 | `/opt/data/zones` | Installed zone wire and JSON under `<hh>/<ll>/`. `catalogue.json` stays in this directory. |
 | `/opt/data/catalog` | Catalog file (zone names and full SOA records) and its mtime, which is the catalog SOA serial. One catalog, not sharded. |
-| `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transfer state. NSD's on-disk zone copies are `zones/<hh>/<ll>/`. |
+| `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transfer state. NSD's zone copies are `zones/<c1>/<c2>/<name>.zone`. |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
 | `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the generated nginx config (`/run/nginx/nginx.conf`), nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
 
 ### Per-zone files
 
-Per-zone files use two directory levels. The canonical zone name is the apex with surrounding whitespace removed, lowercased with `str.lower()`, and with every trailing dot removed. `james.isthisyou.me.` and `James.IsThisYou.Me` are both `james.isthisyou.me`. Stored apexes are already ASCII (IDNA); this step does not punycode them again.
+The hidden primary stores each zone under two directory levels. The canonical zone name is the apex with surrounding whitespace removed, lowercased with `str.lower()`, and with every trailing dot removed. `james.isthisyou.me.` and `James.IsThisYou.Me` are both `james.isthisyou.me`. Stored apexes are already ASCII (IDNA); this step does not punycode them again.
 
 The hash input is the UTF-8 bytes of that string. The digest is 32-bit FNV-1a: offset basis `2166136261` (`0x811c9dc5`), prime `16777619` (`0x01000193`), and for each byte `hash = (hash XOR byte) * prime` modulo `2**32`. The 32-bit value is xor-folded to 16 bits: the high 16 bits XOR the low 16 bits, `(hash >> 16) ^ (hash & 0xFFFF)`. `hh` is the high byte of that 16-bit value and `ll` is the low byte, each written as two lowercase hex digits. The path is `<dir>/<hh>/<ll>/<file>`. Two levels is the whole layout. It stays two levels as the number of zones grows.
 
@@ -63,15 +63,22 @@ For `james.isthisyou.me` the FNV-1a 32-bit hash is `0x9d00b292`, the folded valu
 | --- | --- |
 | Installed AXFR wire | `/opt/data/zones/2f/92/james.isthisyou.me.axfr` |
 | JSON copy of the zone document | `/opt/data/zones/2f/92/james.isthisyou.me.json` |
-| NSD zonefile (relative to `zonesdir`) | `2f/92/james.isthisyou.me.axfr` under `/opt/data/nsd/zones` |
+| NSD member zonefile | `/opt/data/nsd/zones/j/a/james.isthisyou.me.zone` |
+| NSD catalog zonefile | `/opt/data/nsd/zones/catalog.zone` |
 
-Directories are created when a file is written. Writes stay under `/opt/data` (or on the `/run` and `/tmp` tmpfs). On startup, flat files already sitting in those directories are moved into the shard. The move is safe to run again: a second pass finds nothing to move, and a shard copy that already matches is kept.
+The hidden primary's files use the hash above. NSD cannot put a hash in a `zonefile` pattern, so member zones use NSD's own character substitutions: `zonefile: "%1/%2/%s.zone"` on the `catalog-member` pattern. `%1` and `%2` are the first and second characters of the zone name, and `%s` is the whole name. For `james.isthisyou.me` that is `j/a/james.isthisyou.me.zone`.
 
-NSD `zonefile` patterns expand `%s`, `%1`, `%2`, `%3`, `%z`, `%y`, and `%x`. Those are the zone name, single characters, and labels. Generated `nsd.conf` therefore gives every zone its own `zonefile:` line with the path above. The catalog zone is still a catalog consumer. Member zones include the `catalog-member` pattern and override `zonefile` with the explicit path. When the member set changes, the controller rewrites `nsd.conf` and reloads NSD.
+NSD's `get_char` (`options.c`) uses `.` when the requested character does not exist. A path component `.` is the current directory, so a one-character name `a` is written as `a/./a.zone`, which is `a/a.zone`. The same thing happens when the second character really is `.`, as in `a.example` (`a/./a.example.zone`). Those zones share the first-character directory. The file name is still the full zone name, so they do not overwrite each other.
 
-`zonesdir` is `/opt/data/nsd/zones`. `zonefiles-write: 60` stores a changed zone to its `zonefile` within 60 seconds. The `hh/ll` directory is created when that config is written and is owned by the `nsd` user, the account NSD drops to after it binds port 53. On restart NSD reads those files into memory, then runs the normal SOA refresh against `127.0.0.1:5353`. It AXFRs when the serial on that primary is newer. The hidden primary's own copy remains `/opt/data/zones`.
+NSD creates the missing parent directories itself. `namedb_write_zonefile` in `dbcreate.c` calls `create_dirs`, which `mkdir`s each component mode `0750` and treats "already exists" as success. The `nsd.conf` manual and `doc/UPGRADING` say the same: directories named in a `zonefile` path are created as needed. This service creates `/opt/data/nsd/zones` and gives it to the `nsd` user before NSD starts, so those `mkdir`s succeed after NSD drops privileges. The character directories are not pre-created.
 
-The spool is a queue of uniquely named job files, one per upload, so it stays a single directory. Cron runs every 15 minutes. It deletes empty files older than five minutes at the top of `/opt/data/spool` (`find -maxdepth 1`) and files older than five minutes under `spool/tmp`. NSD's `xfrdir` holds transfer temps named `nsd-xfr-<pid>/xfr.<n>`, which are not one file per zone. A flat zone file left in that directory is moved into the same shard on startup.
+`zonefiles-write: 60` stores a changed zone within 60 seconds. On restart NSD reads the file, then runs the normal SOA refresh against `127.0.0.1:5353` and AXFRs when that serial is newer.
+
+Files left from the earlier hash layout, `/opt/data/nsd/zones/<hh>/<ll>/*.axfr`, are deleted at startup. NSD transfers each of those zones once and writes the character path. The hidden primary's files under `/opt/data/zones` stay in the hash layout. Flat files already in `/opt/data/zones` are moved into `<hh>/<ll>/` on startup. That move is safe to run again.
+
+Directories for the hidden primary are created when a file is written. Writes stay under `/opt/data` (or on the `/run` and `/tmp` tmpfs).
+
+The spool is a queue of uniquely named job files, one per upload, so it stays a single directory. Cron runs every 15 minutes. It deletes empty files older than five minutes at the top of `/opt/data/spool` (`find -maxdepth 1`) and files older than five minutes under `spool/tmp`. NSD's `xfrdir` holds transfer temps named `nsd-xfr-<pid>/xfr.<n>`. Those names are not zone names, so that directory is not sharded.
 
 ### HTTP
 
@@ -171,7 +178,7 @@ If none of the parent nameservers can be reached, admission fails with `parent_l
 
 The parent NS name set must equal the apex NS set. If the parent is missing a service NS the error is `parent_ns_incomplete` (403). Any other difference is `ns_set_mismatch` (422). The DS digest is compared to the uploaded KSK before any signature in the upload is verified. Signature verification is last.
 
-On success the API writes wire-format AXFR data into the spool (an empty `mktemp` file in `/opt/data/spool`, the bytes under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs the zone under the sharded path and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. When the set of member zones changes, the controller rewrites `nsd.conf` and reloads NSD.
+On success the API writes wire-format AXFR data into the spool (an empty `mktemp` file in `/opt/data/spool`, the bytes under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs the zone under the sharded path and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. NSD is not reloaded. It learns the new member from the catalog transfer.
 
 ## Processes
 
@@ -181,8 +188,8 @@ On success the API writes wire-format AXFR data into the spool (an empty `mktemp
 | Zone controller | one process | Polls the spool, ignores empty files, directories and hidden names, re-checks the SOA serial, installs the zone, ages out zones expired for more than 90 days. |
 | DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
 | DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
-| NSD | one process | Public port 53. Catalog consumer plus one zone entry per member, each with a sharded `zonefile`. Writes those files every 60 seconds and loads them on restart, then checks SOA. Reloaded when the member set changes. Remote control listens on `127.0.0.1:8952`. |
-| cron | busybox `crond` | Every 15 minutes, deletes empty spool files and orphaned `tmp` files older than five minutes. |
+| NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). Member zones come from that catalog and are stored with `zonefile: "%1/%2/%s.zone"`. Writes those files every 60 seconds, loads them on restart, then checks SOA. Remote control listens on `127.0.0.1:8952`. |
+| cron | busybox `crond -S` | Every 15 minutes, deletes empty spool files and orphaned `tmp` files older than five minutes. Messages go to syslog. |
 
 ## Secondaries
 
