@@ -1,7 +1,8 @@
 """Operator configuration from ``/opt/data/etc/config.yaml``.
 
 A missing file is empty configuration and the defaults below apply. The
-process refuses to start when ``service_ns`` is unset. Tests construct
+process refuses to start when ``service_ns`` is unset. ``log_level``
+defaults to ``info`` and must be a syslog severity name. Tests construct
 ``Settings`` directly. TSIG secrets may be inline or read from a file; they
 are never taken from a zone upload.
 """
@@ -194,7 +195,18 @@ class Settings:
     type_allowlist: frozenset = field(default_factory=frozenset)
     trusted_proxies: list = field(default_factory=list)
     health_check_dns: bool = True
+    log_level: str = "info"
     now_fn: Callable[[], int] = _now
+
+    def __post_init__(self) -> None:
+        from dns_host.logutil import parse_log_level, set_log_level
+
+        try:
+            canonical = parse_log_level(self.log_level)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        self.log_level = canonical
+        set_log_level(canonical)
 
     def now(self) -> int:
         return int(self.now_fn())
@@ -240,6 +252,7 @@ class Settings:
 
     @classmethod
     def from_mapping(cls, raw: dict) -> "Settings":
+        log_level = _map_log_level(raw)
         service_ns = _names_value(raw.get("service_ns", []))
         catalog = normalise_name(
             str(raw.get("catalog_zone") or "catalog.example.net."),
@@ -338,7 +351,22 @@ class Settings:
             trusted_proxies=parse_trusted_proxies(
                 _csv(raw.get("trusted_proxies", ""))),
             health_check_dns=_map_bool(raw, "health_check_dns", True),
+            log_level=log_level,
         )
+
+
+def _map_log_level(raw: dict) -> str:
+    if "log_level" not in raw:
+        return "info"
+    value = raw.get("log_level")
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return "info"
+    from dns_host.logutil import parse_log_level
+
+    try:
+        return parse_log_level(value)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _map_int(raw: dict, key: str, default: int) -> int:
@@ -465,6 +493,7 @@ def log_effective(settings: Settings) -> None:
     log(
         "info",
         "configuration",
+        log_level=settings.log_level,
         service_ns=[name.to_text() for name in settings.service_ns],
         resolver_base_url=settings.resolver_base_url,
         catalog_zone=settings.catalog_zone.to_text()

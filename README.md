@@ -75,6 +75,9 @@ nginx presents each application tree as `/api/` on its own listener.
 | `trust_anchor_file` | image copy of the IANA root DS set | DS records for the ICANN root. |
 | `grace_days` | `90` | How long to keep serving after RRSIG expiry or parent DS/NS drift. |
 | `max_body_bytes` / `max_rrsets` / `max_names` / `max_rdata_bytes` | 1 MiB / 2000 / 1000 / 4096 | Upload and rdata caps. |
+| `log_level` | `info` | Minimum severity for application logs and the gunicorn error, access, and root loggers. |
+
+`log_level` is a syslog severity name, matched without regard to case: `debug`, `info`, `notice`, `warning` (also `warn`), `err` (also `error`), `crit`, `alert`, `emerg`. Aliases are stored as the syslog name (`warn` becomes `warning`, `error` becomes `err`). The application `log()` drops anything less severe than this level, on stdout and on syslog. The same value sets the gunicorn `error`, `access`, and root loggers: `notice` is Python `INFO`, `err` is Python `ERROR`, and `crit`, `alert`, and `emerg` are Python `CRITICAL`. Production typically uses `warning`, which leaves routine per-request lines (a zone accepted or rejected, a rate limit, a NOTIFY that was sent) out of the log. An unrecognised value stops the process with a config validation error.
 
 The example file lists the rate limits, the serial window, and the DS digest list. `handshake_root_servers` and `handshake_trust_anchor_file` together enable a second walk when the name is proved absent from the ICANN root.
 

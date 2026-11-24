@@ -2,6 +2,7 @@
 
 Records go to syslog (the container's busybox syslogd writes
 ``/opt/data/log/messages``) and to stdout for a foreground run outside init.
+Messages below the configured ``log_level`` are dropped on both paths.
 """
 
 from __future__ import annotations
@@ -12,16 +13,90 @@ import syslog
 from datetime import datetime, timezone
 from typing import Any
 
-_LEVELS = {
-    "error": syslog.LOG_ERR,
-    "warning": syslog.LOG_WARNING,
-    "info": syslog.LOG_INFO,
+# Least severe to most severe. ``warn`` and ``error`` are accepted aliases.
+_ORDER = (
+    "debug",
+    "info",
+    "notice",
+    "warning",
+    "err",
+    "crit",
+    "alert",
+    "emerg",
+)
+_ALIASES = {
+    "warn": "warning",
+    "error": "err",
 }
+_CANONICAL = {name: name for name in _ORDER}
+_CANONICAL.update(_ALIASES)
+_RANK = {name: index for index, name in enumerate(_ORDER)}
+_ALLOWED = ", ".join(_ORDER)
+
+_SYSLOG = {
+    "debug": syslog.LOG_DEBUG,
+    "info": syslog.LOG_INFO,
+    "notice": syslog.LOG_NOTICE,
+    "warning": syslog.LOG_WARNING,
+    "err": syslog.LOG_ERR,
+    "crit": syslog.LOG_CRIT,
+    "alert": syslog.LOG_ALERT,
+    "emerg": syslog.LOG_EMERG,
+}
+# Python has no NOTICE level. crit, alert and emerg share CRITICAL.
+_PYTHON_NAME = {
+    "debug": "DEBUG",
+    "info": "INFO",
+    "notice": "INFO",
+    "warning": "WARNING",
+    "err": "ERROR",
+    "crit": "CRITICAL",
+    "alert": "CRITICAL",
+    "emerg": "CRITICAL",
+}
+
+_threshold = _RANK["info"]
 _opened = False
+
+
+def parse_log_level(value: object) -> str:
+    """Return the canonical syslog name for ``value``.
+
+    Matching is case-insensitive. ``warn`` is ``warning`` and ``error`` is
+    ``err``. An unrecognised value raises ``ValueError``.
+    """
+
+    text = str(value).strip().lower()
+    canonical = _CANONICAL.get(text)
+    if canonical is None:
+        raise ValueError(
+            f"invalid log_level {value!r}: expected one of {_ALLOWED} "
+            "(warn and error are also accepted)")
+    return canonical
+
+
+def set_log_level(level: str) -> None:
+    """Apply ``level`` to later ``log`` calls in this process."""
+
+    global _threshold
+    _threshold = _RANK[parse_log_level(level)]
+
+
+def python_level_name(level: str) -> str:
+    """Map a syslog ``log_level`` onto a Python logging level name."""
+
+    return _PYTHON_NAME[parse_log_level(level)]
+
+
+def _canonical(level: str) -> str | None:
+    return _CANONICAL.get(str(level).strip().lower())
 
 
 def log(level: str, msg: str, **fields: Any) -> None:
     global _opened
+    canonical = _canonical(level)
+    if canonical is not None and _RANK[canonical] < _threshold:
+        return
     record = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "level": level,
@@ -35,7 +110,8 @@ def log(level: str, msg: str, **fields: Any) -> None:
         if not _opened:
             syslog.openlog("dns-host", syslog.LOG_PID, syslog.LOG_DAEMON)
             _opened = True
-        syslog.syslog(_LEVELS.get(level, syslog.LOG_INFO), line)
+        priority = _SYSLOG.get(canonical or "", syslog.LOG_INFO)
+        syslog.syslog(priority, line)
     except OSError:
         pass
     print(line, file=sys.stdout, flush=True)
