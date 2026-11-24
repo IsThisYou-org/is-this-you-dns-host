@@ -160,7 +160,7 @@ The sample zone will not pass against the public resolver unless `user.example` 
 }
 ```
 
-Names are stored absolute, lowercased, with one trailing dot. Unicode labels are converted with IDNA. A missing trailing dot is added; it does not make the name relative to the apex, so send `www.user.example.` and not `www`. Names inside rdata follow zone-file rules: no trailing dot means relative to the apex. Wildcards are rejected. Labels may contain underscore (`_auth`).
+Names are stored absolute, lowercased, with one trailing dot. Unicode labels are converted with IDNA. A missing trailing dot is added; it does not make the name relative to the apex, so send `www.user.example.` and not `www`. Names inside rdata follow zone-file rules: no trailing dot means relative to the apex. Wildcards are rejected. Labels may contain underscore (`_auth`). Each `RRSIG` item is one covered type and uses that RRset's TTL; a rollover may include several signatures for the same covered type.
 
 SOA serial is unix time. It must be greater than the serial already stored, not more than 5 minutes ahead of the service clock, and not older than one hour.
 

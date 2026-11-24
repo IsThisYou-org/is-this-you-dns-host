@@ -20,8 +20,10 @@ RRSIG = dns.rdatatype.RRSIG
 @dataclass
 class ParsedZone:
     apex: dns.name.Name
-    rrsets: dict[tuple[dns.name.Name, int], dns.rrset.RRset] = field(default_factory=dict)
-    sigs: dict[tuple[dns.name.Name, int], dns.rrset.RRset] = field(default_factory=dict)
+    rrsets: dict[tuple[dns.name.Name, int],
+                 dns.rrset.RRset] = field(default_factory=dict)
+    sigs: dict[tuple[dns.name.Name, int],
+               dns.rrset.RRset] = field(default_factory=dict)
 
     def get(self, rdtype, name=None):
         owner = self.apex if name is None else name
@@ -84,11 +86,21 @@ def _sort_key(key):
     return (tuple(reversed(name.canonicalize().labels)), int(rdtype))
 
 
+def _group_key(rrset: dns.rrset.RRset) -> tuple:
+    type_text = dns.rdatatype.to_text(rrset.rdtype)
+    if int(rrset.rdtype) == int(RRSIG):
+        covered = int(next(iter(rrset)).type_covered)
+        return (rrset.name.to_text(), type_text, covered)
+    return (rrset.name.to_text(), type_text)
+
+
 def _add_group(grouped: dict, rrset: dns.rrset.RRset) -> None:
     type_text = dns.rdatatype.to_text(rrset.rdtype)
-    map_key = (rrset.name.to_text(), type_text)
+    map_key = _group_key(rrset)
     bucket = grouped.get(map_key)
-    wires = [base64.b64encode(rdata.to_wire()).decode("ascii") for rdata in rrset]
+    wires = [
+        base64.b64encode(rdata.to_wire()).decode("ascii") for rdata in rrset
+    ]
     if bucket is None:
         grouped[map_key] = {
             "name": rrset.name.to_text(),
@@ -96,8 +108,39 @@ def _add_group(grouped: dict, rrset: dns.rrset.RRset) -> None:
             "ttl": int(rrset.ttl),
             "wire": wires,
         }
-    else:
-        bucket["wire"].extend(wires)
+        return
+    if int(bucket["ttl"]) != int(rrset.ttl):
+        raise ValueError(
+            f"{rrset.name.to_text()} {type_text} has more than one TTL")
+    bucket["wire"].extend(wires)
+
+
+def _store_sigs(parsed: ParsedZone, name: dns.name.Name, ttl: int,
+                rdatas: list) -> None:
+    """Keep one signature RRset per covered type, each with its own TTL.
+
+    A rollover may add another signature for the same covered type. Those
+    combine when the TTL matches and are rejected when it does not.
+    """
+
+    by_covered: dict[int, list] = {}
+    for rdata in rdatas:
+        by_covered.setdefault(int(rdata.type_covered), []).append(rdata)
+    for covered, group in by_covered.items():
+        sig_key = (name, covered)
+        existing = parsed.sigs.get(sig_key)
+        if existing is None:
+            parsed.sigs[sig_key] = dns.rrset.from_rdata(name, ttl, *group)
+            continue
+        if int(existing.ttl) != int(ttl):
+            covered_name = dns.rdatatype.to_text(covered)
+            raise ApiError(
+                422,
+                "duplicate_rrset",
+                f"RRSIG covering {covered_name} at {name} has more than one TTL",
+            )
+        parsed.sigs[sig_key] = dns.rrset.from_rdata(name, ttl, *list(existing),
+                                                    *group)
 
 
 def document_to_zone(apex: dns.name.Name, document: dict) -> ParsedZone:
@@ -109,15 +152,14 @@ def document_to_zone(apex: dns.name.Name, document: dict) -> ParsedZone:
         rdatas = []
         for encoded in item["wire"]:
             wire = base64.b64decode(encoded)
-            rdatas.append(dns.rdata.from_wire(dns.rdataclass.IN, rdtype, wire, 0, len(wire)))
+            rdatas.append(
+                dns.rdata.from_wire(dns.rdataclass.IN, rdtype, wire, 0,
+                                    len(wire)))
         if rdtype == RRSIG:
-            by_covered: dict[int, list] = {}
-            for rdata in rdatas:
-                by_covered.setdefault(int(rdata.type_covered), []).append(rdata)
-            for covered, group in by_covered.items():
-                parsed.sigs[(name, covered)] = dns.rrset.from_rdata(name, ttl, *group)
+            _store_sigs(parsed, name, ttl, rdatas)
         else:
-            parsed.rrsets[(name, int(rdtype))] = dns.rrset.from_rdata(name, ttl, *rdatas)
+            parsed.rrsets[(name, int(rdtype))] = dns.rrset.from_rdata(
+                name, ttl, *rdatas)
     return parsed
 
 
@@ -130,7 +172,8 @@ def parse_upload(body: dict, url_apex: dns.name.Name) -> ParsedZone:
         raise ApiError(400, "bad_request", "apex and rrsets are required")
     apex = normalise_apex(body["apex"])
     if apex != url_apex:
-        raise ApiError(400, "bad_request", "JSON apex does not match the URL apex")
+        raise ApiError(400, "bad_request",
+                       "JSON apex does not match the URL apex")
     rrsets = body["rrsets"]
     if not isinstance(rrsets, list):
         raise ApiError(400, "bad_request", "rrsets must be an array")
@@ -138,12 +181,16 @@ def parse_upload(body: dict, url_apex: dns.name.Name) -> ParsedZone:
     seen: set[tuple[dns.name.Name, int]] = set()
     for index, item in enumerate(rrsets):
         if not isinstance(item, dict):
-            raise ApiError(400, "bad_request", f"rrsets[{index}] must be an object")
+            raise ApiError(400, "bad_request",
+                           f"rrsets[{index}] must be an object")
         if item.get("kind") != "dns#resourceRecordSet":
-            raise ApiError(400, "bad_request", f"rrsets[{index}].kind must be dns#resourceRecordSet")
+            raise ApiError(
+                400, "bad_request",
+                f"rrsets[{index}].kind must be dns#resourceRecordSet")
         for field_name in ("name", "type", "ttl", "rrdatas"):
             if field_name not in item:
-                raise ApiError(400, "bad_request", f"rrsets[{index}] missing {field_name}")
+                raise ApiError(400, "bad_request",
+                               f"rrsets[{index}] missing {field_name}")
         try:
             owner = normalise_name(item["name"], what=f"rrsets[{index}].name")
         except ApiError:
@@ -157,26 +204,39 @@ def parse_upload(body: dict, url_apex: dns.name.Name) -> ParsedZone:
         try:
             rdtype = parse_type(str(item["type"]))
         except Exception as exc:
-            raise ApiError(400, "bad_request", f"rrsets[{index}].type is not a DNS type") from exc
+            raise ApiError(400, "bad_request",
+                           f"rrsets[{index}].type is not a DNS type") from exc
         blocked = admission_block_reason(rdtype)
         if blocked is not None:
             raise ApiError(422, "type_not_allowed", blocked)
-        if not isinstance(item["ttl"], int) or isinstance(item["ttl"], bool) or item["ttl"] < 0:
-            raise ApiError(400, "bad_request", f"rrsets[{index}].ttl must be a non-negative integer")
+        if not isinstance(item["ttl"], int) or isinstance(
+                item["ttl"], bool) or item["ttl"] < 0:
+            raise ApiError(
+                400, "bad_request",
+                f"rrsets[{index}].ttl must be a non-negative integer")
         datas = item["rrdatas"]
         if not isinstance(datas, list) or not datas:
-            raise ApiError(400, "bad_request", f"rrsets[{index}].rrdatas must be a non-empty array")
+            raise ApiError(
+                400, "bad_request",
+                f"rrsets[{index}].rrdatas must be a non-empty array")
         key = (owner, int(rdtype))
-        if key in seen:
-            raise ApiError(422, "duplicate_rrset", f"duplicate RRset {owner} {dns.rdatatype.to_text(rdtype)}")
-        seen.add(key)
+        # RRSIG is one RRset per covered type, and a rollover may repeat that
+        # covered type. The signature path merges matching TTLs itself.
+        if rdtype != RRSIG:
+            if key in seen:
+                raise ApiError(
+                    422, "duplicate_rrset",
+                    f"duplicate RRset {owner} {dns.rdatatype.to_text(rdtype)}")
+            seen.add(key)
         rdatas = []
         texts = set()
         for data in datas:
             if not isinstance(data, str) or not data.strip():
-                raise ApiError(400, "bad_request", f"rrsets[{index}].rrdatas must be strings")
+                raise ApiError(400, "bad_request",
+                               f"rrsets[{index}].rrdatas must be strings")
             if data in texts:
-                raise ApiError(400, "bad_request", f"rrsets[{index}] contains duplicate rdata")
+                raise ApiError(400, "bad_request",
+                               f"rrsets[{index}] contains duplicate rdata")
             texts.add(data)
             try:
                 rdatas.append(rdata_from_text(rdtype, data, origin=apex))
@@ -187,14 +247,8 @@ def parse_upload(body: dict, url_apex: dns.name.Name) -> ParsedZone:
                     f"rrsets[{index}] {dns.rdatatype.to_text(rdtype)} rdata did not parse: {exc}",
                 ) from exc
         if rdtype == RRSIG:
-            by_covered: dict[int, list] = {}
-            for rdata in rdatas:
-                by_covered.setdefault(int(rdata.type_covered), []).append(rdata)
-            for covered, group in by_covered.items():
-                sig_key = (owner, covered)
-                if sig_key in parsed.sigs:
-                    raise ApiError(422, "duplicate_rrset", f"duplicate RRSIG covering {owner}")
-                parsed.sigs[sig_key] = dns.rrset.from_rdata(owner, int(item["ttl"]), *group)
+            _store_sigs(parsed, owner, int(item["ttl"]), rdatas)
         else:
-            parsed.rrsets[key] = dns.rrset.from_rdata(owner, int(item["ttl"]), *rdatas)
+            parsed.rrsets[key] = dns.rrset.from_rdata(owner, int(item["ttl"]),
+                                                      *rdatas)
     return parsed

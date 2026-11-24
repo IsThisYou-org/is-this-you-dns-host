@@ -36,7 +36,8 @@ def generate_key(flags: int, algorithm: int = 13):
     return private, dnskey
 
 
-def sign_rrset(rrset, private, dnskey, signer, inception: int, expiration: int):
+def sign_rrset(rrset, private, dnskey, signer, inception: int,
+               expiration: int):
     return dns.dnssec.sign(
         rrset,
         private,
@@ -80,14 +81,25 @@ def signed_zone_document(
     )
     records = [
         _rr(origin, "SOA", ttl, soa_text, origin=origin),
-        _rr(origin, "NS", ttl, *[dns.name.from_text(item).to_text() for item in ns_names], origin=origin),
+        _rr(origin,
+            "NS",
+            ttl,
+            *[dns.name.from_text(item).to_text() for item in ns_names],
+            origin=origin),
         dns.rrset.from_rdata(origin, ttl, ksk, zsk),
     ]
     if nsec3:
-        records.append(_rr(origin, "NSEC3PARAM", ttl, "1 0 0 -", origin=origin))
-    for name_text, rdtype, rrdatas in extras or []:
+        records.append(_rr(origin, "NSEC3PARAM", ttl, "1 0 0 -",
+                           origin=origin))
+    for extra in extras or []:
+        record_ttl = ttl
+        if len(extra) == 4:
+            name_text, rdtype, rrdatas, record_ttl = extra
+        else:
+            name_text, rdtype, rrdatas = extra
         owner = dns.name.from_text(name_text, origin)
-        records.append(_rr(owner, rdtype, ttl, *rrdatas, origin=origin))
+        records.append(
+            _rr(owner, rdtype, int(record_ttl), *rrdatas, origin=origin))
 
     owners: dict[dns.name.Name, set[int]] = {}
     for rrset in records:
@@ -103,55 +115,72 @@ def signed_zone_document(
         hashed.sort(key=lambda item: item[0])
         for index, (label, _name, types) in enumerate(hashed):
             nxt = hashed[(index + 1) % len(hashed)][0]
-            type_text = " ".join(dns.rdatatype.to_text(item) for item in sorted(types))
+            type_text = " ".join(
+                dns.rdatatype.to_text(item) for item in sorted(types))
             text = f"1 0 0 - {nxt}" + (f" {type_text}" if type_text else "")
             owner = dns.name.from_text(label, origin)
             records.append(_rr(owner, "NSEC3", ttl, text, origin=origin))
     else:
-        names = sorted(covered, key=lambda name: tuple(reversed(name.canonicalize().labels)))
+        names = sorted(
+            covered,
+            key=lambda name: tuple(reversed(name.canonicalize().labels)))
         for index, name in enumerate(names):
             nxt = names[(index + 1) % len(names)]
             types = expected_types(owners.get(name, set()))
-            type_text = " ".join(dns.rdatatype.to_text(item) for item in sorted(types))
+            type_text = " ".join(
+                dns.rdatatype.to_text(item) for item in sorted(types))
             text = nxt.to_text() + (f" {type_text}" if type_text else "")
             records.append(_rr(name, "NSEC", ttl, text, origin=origin))
 
-    sigs_by_owner: dict[dns.name.Name, list] = {}
-    for rrset in records:
-        if int(rrset.rdtype) == int(dns.rdatatype.DNSKEY):
-            signature = sign_rrset(rrset, ksk_private, ksk, origin, inception, expiration)
-        else:
-            signature = sign_rrset(rrset, zsk_private, zsk, origin, inception, expiration)
-        sigs_by_owner.setdefault(rrset.name, []).append(signature)
-
     def _presentation(rrset) -> dict:
         return {
-            "kind": "dns#resourceRecordSet",
-            "name": rrset.name.to_text(),
-            "type": dns.rdatatype.to_text(rrset.rdtype),
-            "ttl": int(rrset.ttl),
-            "rrdatas": [rdata.to_text(origin=origin, relativize=False) for rdata in rrset],
+            "kind":
+            "dns#resourceRecordSet",
+            "name":
+            rrset.name.to_text(),
+            "type":
+            dns.rdatatype.to_text(rrset.rdtype),
+            "ttl":
+            int(rrset.ttl),
+            "rrdatas": [
+                rdata.to_text(origin=origin, relativize=False)
+                for rdata in rrset
+            ],
         }
 
     rrsets = [_presentation(rrset) for rrset in records]
-    for owner, signatures in sigs_by_owner.items():
-        rrsets.append(
-            {
-                "kind": "dns#resourceRecordSet",
-                "name": owner.to_text(),
-                "type": "RRSIG",
-                "ttl": int(ttl),
-                "rrdatas": [sig.to_text(origin=origin, relativize=False) for sig in signatures],
-            }
-        )
+    for rrset in records:
+        if int(rrset.rdtype) == int(dns.rdatatype.DNSKEY):
+            signature = sign_rrset(rrset, ksk_private, ksk, origin, inception,
+                                   expiration)
+        else:
+            signature = sign_rrset(rrset, zsk_private, zsk, origin, inception,
+                                   expiration)
+        # One item per covered type, with that RRset's TTL. sign() returns rdata.
+        rrsets.append({
+            "kind":
+            "dns#resourceRecordSet",
+            "name":
+            rrset.name.to_text(),
+            "type":
+            "RRSIG",
+            "ttl":
+            int(rrset.ttl),
+            "rrdatas": [signature.to_text(origin=origin, relativize=False)],
+        })
     if tamper:
         for item in rrsets:
-            if item["type"] == "TXT" and item["name"] == dns.name.from_text(tamper, origin).to_text():
+            if item["type"] == "TXT" and item["name"] == dns.name.from_text(
+                    tamper, origin).to_text():
                 item["rrdatas"] = ['"tampered"']
                 break
         else:
             raise RuntimeError(f"tamper target {tamper} not found")
-    return {"kind": "dnsauth#signedZone", "apex": origin.to_text(), "rrsets": rrsets}
+    return {
+        "kind": "dnsauth#signedZone",
+        "apex": origin.to_text(),
+        "rrsets": rrsets
+    }
 
 
 def ds_text(apex: str, dnskey, digest: str = "SHA256") -> str:
