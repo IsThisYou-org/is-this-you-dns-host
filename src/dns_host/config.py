@@ -22,8 +22,6 @@ import dns.rrset
 from dns_host.names import normalise_name
 from dns_host.rrtypes import DEFAULT_TYPES
 
-_REPO_ANCHORS = Path(
-    __file__).resolve().parents[2] / "deploy" / "root-anchors.ds"
 CONFIG_PATH = Path("/opt/data/etc/config.yaml")
 
 # The internal DNS listener is not operator configuration. UDP (SOA and
@@ -31,6 +29,25 @@ CONFIG_PATH = Path("/opt/data/etc/config.yaml")
 # accepted.
 DNS_BIND = "127.0.0.1"
 DNS_PORT = 5353
+
+# nginx's localhost listener and gunicorn stay inside the container. They
+# are not operator configuration.
+INTERNAL_HTTP_PORT = 8081
+GUNICORN_BIND = "127.0.0.1:8000"
+
+# Public HTTP, NSD, the data directory, and the ICANN trust-anchor file
+# are fixed by the image.
+HTTP_PORT = 80
+NSD_BIND = "0.0.0.0"
+NSD_PORT = 53
+DATA_DIR = Path("/opt/data")
+TRUST_ANCHOR_FILE = Path("/app/deploy/root-anchors.ds")
+
+
+def data_dir() -> Path:
+    """Persistent state directory. Tests may monkeypatch ``DATA_DIR``."""
+
+    return DATA_DIR
 
 
 def _now() -> int:
@@ -147,15 +164,9 @@ class Settings:
     resolver_base_url: str = "https://api.isthisyou.org/"
     catalog_zone: object = None
     catalog_rname: object = None
-    data_dir: Path = Path("/opt/data")
-    http_port: int = 80
-    internal_http_port: int = 8081
-    gunicorn_bind: str = "127.0.0.1:8000"
     gunicorn_workers: int = 3
     axfr_children: int = 5
     dnskey_cache_seconds: int = 3600
-    nsd_bind: str = "0.0.0.0"
-    nsd_port: int = 53
     max_body_bytes: int = 1048576
     max_rrsets: int = 2000
     max_names: int = 1000
@@ -181,11 +192,6 @@ class Settings:
     trust_anchors: list = field(default_factory=list)
     handshake_root_servers: list = field(default_factory=list)
     handshake_trust_anchors: list = field(default_factory=list)
-    tsig_key_name: str = ""
-    tsig_secret: str = ""
-    tsig_algo: str = "hmac-sha256"
-    axfr_require_tsig: bool = False
-    manage_nsd: bool = False
     maintenance_interval_seconds: int = 300
     soa_refresh: int = 3600
     soa_retry: int = 600
@@ -227,7 +233,7 @@ class Settings:
 
     @property
     def db_path(self) -> Path:
-        return Path(self.data_dir) / "host.db"
+        return data_dir() / "host.db"
 
     @property
     def allowed_axfr_ips(self) -> set[str]:
@@ -264,7 +270,6 @@ class Settings:
         else:
             rname = normalise_name("hostmaster." + catalog.to_text(),
                                    what="catalog rname")
-        anchor_path = Path(str(raw.get("trust_anchor_file") or _REPO_ANCHORS))
         hs_path = str(raw.get("handshake_trust_anchor_file") or "")
         if raw.get("type_allowlist"):
             types = frozenset(
@@ -278,7 +283,6 @@ class Settings:
         digests = tuple(
             int(item) for item in _string_list(raw.get("ds_digest_types", "2"))
             if str(item).strip())
-        tsig_name, tsig_secret, tsig_algo = _global_tsig(raw)
         return cls(
             service_ns=service_ns,
             secondaries=_secondaries_value(raw.get("secondaries", [])),
@@ -286,15 +290,9 @@ class Settings:
                 raw.get("resolver_base_url") or "https://api.isthisyou.org/"),
             catalog_zone=catalog,
             catalog_rname=rname,
-            data_dir=Path(str(raw.get("data_dir") or "/opt/data")),
-            http_port=_map_int(raw, "http_port", 80),
-            internal_http_port=_map_int(raw, "internal_http_port", 8081),
-            gunicorn_bind=str(raw.get("gunicorn_bind") or "127.0.0.1:8000"),
             gunicorn_workers=_map_int(raw, "gunicorn_workers", 3),
             axfr_children=_map_int(raw, "axfr_children", 5),
             dnskey_cache_seconds=_map_int(raw, "dnskey_cache_seconds", 3600),
-            nsd_bind=str(raw.get("nsd_bind") or "0.0.0.0"),
-            nsd_port=_map_int(raw, "nsd_port", 53),
             max_body_bytes=_map_int(raw, "max_body_bytes", 1048576),
             max_rrsets=_map_int(raw, "max_rrsets", 2000),
             max_names=_map_int(raw, "max_names", 1000),
@@ -330,16 +328,11 @@ class Settings:
                 raw.get("doh_timeout_seconds") if raw.
                 get("doh_timeout_seconds") not in (None, "") else 5),
             doh_cd=_map_int(raw, "doh_cd", 1),
-            trust_anchors=load_ds_anchors(anchor_path),
+            trust_anchors=load_ds_anchors(TRUST_ANCHOR_FILE),
             handshake_root_servers=_names_value(
                 raw.get("handshake_root_servers", [])),
             handshake_trust_anchors=load_ds_anchors(Path(hs_path))
             if hs_path else [],
-            tsig_key_name=tsig_name,
-            tsig_secret=tsig_secret,
-            tsig_algo=tsig_algo,
-            axfr_require_tsig=_map_bool(raw, "axfr_require_tsig", False),
-            manage_nsd=_map_bool(raw, "manage_nsd", True),
             maintenance_interval_seconds=_map_int(
                 raw, "maintenance_interval_seconds", 300),
             soa_refresh=_map_int(raw, "soa_refresh", 3600),
@@ -422,21 +415,6 @@ def _read_secret(item: dict) -> str:
     return str(item.get("tsig_secret") or "")
 
 
-def _global_tsig(raw: dict) -> tuple[str, str, str]:
-    block = raw.get("tsig") or {}
-    if not isinstance(block, dict):
-        block = {}
-    name = str(raw.get("tsig_key_name") or block.get("name") or "")
-    algo = str(raw.get("tsig_algo") or block.get("algorithm") or "hmac-sha256")
-    secret = _read_secret({
-        "tsig_secret":
-        raw.get("tsig_secret", block.get("secret", "")),
-        "tsig_secret_file":
-        raw.get("tsig_secret_file", block.get("secret_file", "")),
-    })
-    return name, secret, algo
-
-
 def _secondaries_value(value) -> list:
     if value is None or value == "" or value == []:
         return []
@@ -502,9 +480,11 @@ def log_effective(settings: Settings) -> None:
         grace_days=settings.grace_days,
         dns_bind=DNS_BIND,
         dns_port=DNS_PORT,
-        nsd_bind=settings.nsd_bind,
-        nsd_port=settings.nsd_port,
-        http_port=settings.http_port,
-        internal_http_port=settings.internal_http_port,
-        data_dir=str(settings.data_dir),
+        nsd_bind=NSD_BIND,
+        nsd_port=NSD_PORT,
+        http_port=HTTP_PORT,
+        internal_http_port=INTERNAL_HTTP_PORT,
+        gunicorn_bind=GUNICORN_BIND,
+        data_dir=str(data_dir()),
+        trust_anchor_file=str(TRUST_ANCHOR_FILE),
     )

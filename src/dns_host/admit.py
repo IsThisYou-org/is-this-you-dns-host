@@ -32,7 +32,8 @@ _PARENT_CACHE_ERRORS = {
 }
 
 
-def admit(body: dict, url_apex, settings, store, lookup, _notifier, client_ip: str) -> tuple[dict, int]:
+def admit(body: dict, url_apex, settings, store, lookup, _notifier,
+          client_ip: str) -> tuple[dict, int]:
     try:
         # The API's serial check fails fast from the catalog the controller
         # publishes. The controller checks the serial again when it takes the
@@ -50,12 +51,13 @@ def admit(body: dict, url_apex, settings, store, lookup, _notifier, client_ip: s
             raise ApiError(cached.http_status, cached.reason, cached.message)
         _enforce_parent_budget(settings, store, client_ip)
         if not store.allow_rate(
-            f"parent:{client_ip}",
-            settings.parent_query_budget,
-            settings.parent_query_window_seconds,
-            settings.now(),
+                f"parent:{client_ip}",
+                settings.parent_query_budget,
+                settings.parent_query_window_seconds,
+                settings.now(),
         ):
-            raise ApiError(429, "rate_limited", "parent lookup budget exceeded")
+            raise ApiError(429, "rate_limited",
+                           "parent lookup budget exceeded")
         lookup_started = time.perf_counter()
         try:
             delegation = parent_checks(zone, settings, lookup)
@@ -64,13 +66,16 @@ def admit(body: dict, url_apex, settings, store, lookup, _notifier, client_ip: s
             _remember_parent_failure(store, settings, url_apex.to_text(), exc)
             raise
         finally:
-            store.incr("parent_lookup_ms_sum", int((time.perf_counter() - lookup_started) * 1000))
+            store.incr("parent_lookup_ms_sum",
+                       int((time.perf_counter() - lookup_started) * 1000))
             store.incr("parent_lookup_ms_count")
         crypto_started = time.perf_counter()
         verify_signatures(zone, matched, settings.now())
-        store.incr("validate_ms_sum", int((time.perf_counter() - crypto_started) * 1000))
+        store.incr("validate_ms_sum",
+                   int((time.perf_counter() - crypto_started) * 1000))
         store.incr("validate_ms_count")
-        _enforce_parent_cap(settings, store, delegation.parent_zone.to_text(), url_apex.to_text())
+        _enforce_parent_cap(settings, store, delegation.parent_zone.to_text(),
+                            url_apex.to_text())
         expiries = zone.rrsig_expiries()
         soa = zone.soa_rdata()
         soa_rrset = zone.get(dns_soa())
@@ -89,7 +94,8 @@ def admit(body: dict, url_apex, settings, store, lookup, _notifier, client_ip: s
         store.remember_parent_day(
             delegation.parent_zone.to_text(),
             url_apex.to_text(),
-            datetime.fromtimestamp(settings.now(), timezone.utc).strftime("%Y-%m-%d"),
+            datetime.fromtimestamp(settings.now(),
+                                   timezone.utc).strftime("%Y-%m-%d"),
         )
         store.incr("upload_ok")
         log(
@@ -134,27 +140,29 @@ def _enforce_parent_budget(settings, store, client_ip: str) -> None:
     # before the lookup, after the cache check. This function only rejects
     # when the bucket is already exhausted.
     if _bucket_exhausted(
-        store,
-        f"parent:{client_ip}",
-        settings.parent_query_budget,
-        settings.parent_query_window_seconds,
-        settings.now(),
+            store,
+            f"parent:{client_ip}",
+            settings.parent_query_budget,
+            settings.parent_query_window_seconds,
+            settings.now(),
     ):
         raise ApiError(429, "rate_limited", "parent lookup budget exceeded")
 
 
-def _bucket_exhausted(store, bucket: str, limit: int, window: int, now: int) -> bool:
+def _bucket_exhausted(store, bucket: str, limit: int, window: int,
+                      now: int) -> bool:
     with store._read() as conn:
         row = conn.execute(
             "SELECT window_start, count FROM rate_limit WHERE bucket = ?",
-            (bucket,),
+            (bucket, ),
         ).fetchone()
     if row is None or now >= int(row["window_start"]) + window:
         return False
     return int(row["count"]) >= limit
 
 
-def _remember_parent_failure(store, settings, apex: str, exc: ApiError) -> None:
+def _remember_parent_failure(store, settings, apex: str,
+                             exc: ApiError) -> None:
     if exc.error not in _PARENT_CACHE_ERRORS:
         return
     store.negative_put(
@@ -170,11 +178,14 @@ def _enforce_parent_cap(settings, store, parent_zone: str, apex: str) -> None:
     cap = settings.apexes_per_parent_per_day
     if cap <= 0:
         return
-    day = datetime.fromtimestamp(settings.now(), timezone.utc).strftime("%Y-%m-%d")
+    day = datetime.fromtimestamp(settings.now(),
+                                 timezone.utc).strftime("%Y-%m-%d")
     if store.parent_day_has(parent_zone, apex, day):
         return
     if store.count_parent_day(parent_zone, day) >= cap:
-        raise ApiError(429, "rate_limited", "distinct apex cap for this parent has been reached today")
+        raise ApiError(
+            429, "rate_limited",
+            "distinct apex cap for this parent has been reached today")
 
 
 def dns_soa():
@@ -184,6 +195,7 @@ def dns_soa():
 
 
 def _spool_dir(settings):
-    from pathlib import Path
+    del settings
+    from dns_host.config import data_dir
 
-    return Path(settings.data_dir) / "spool"
+    return data_dir() / "spool"

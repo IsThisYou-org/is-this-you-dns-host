@@ -35,14 +35,14 @@ def lab(clock):
 
 
 @pytest.fixture
-def settings(tmp_path: Path, clock, lab):
+def settings(tmp_path: Path, clock, lab, monkeypatch):
+    monkeypatch.setattr("dns_host.config.DATA_DIR", tmp_path)
     return Settings(
         service_ns=list(lab.service_ns),
         secondaries=[("127.0.0.1", 9)],
         resolver_base_url="https://resolver.test/",
         catalog_zone=normalise_name("catalog.svc.test."),
         catalog_rname=normalise_name("hostmaster.svc.test."),
-        data_dir=tmp_path,
         trust_anchors=[lab.root_ds],
         type_allowlist=frozenset(item.strip().upper()
                                  for item in DEFAULT_TYPES.split(",")

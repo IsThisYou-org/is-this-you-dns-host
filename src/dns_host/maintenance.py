@@ -12,6 +12,7 @@ import threading
 
 from dns_host.catalog import catalog_soa
 from dns_host.chain import _keys_matching_ds, authenticate_parent
+from dns_host.config import GUNICORN_BIND, data_dir
 from dns_host.doh import DohClient
 from dns_host.errors import ApiError
 from dns_host.logutil import log
@@ -21,17 +22,21 @@ from dns_host.zone import document_to_zone
 
 
 class Maintenance:
+
     def __init__(self, settings, store, lookup=None, notifier=None):
         self.settings = settings
         self.store = store
-        self.lookup = lookup or DohClient(settings.resolver_base_url, settings.doh_timeout_seconds)
+        self.lookup = lookup or DohClient(settings.resolver_base_url,
+                                          settings.doh_timeout_seconds)
         self.notifier = notifier or UdpNotifier(settings, store)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="maintenance", daemon=True)
+        self._thread = threading.Thread(target=self._loop,
+                                        name="maintenance",
+                                        daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -68,18 +73,28 @@ class Maintenance:
             if _delegation_matches(zone, delegation, self.settings):
                 if row.parent_drift_since is not None or not row.parent_ok:
                     log("info", "parent match restored", apex=row.apex)
-                self.store.set_parent_state(row.apex, now=now, ok=True, drift_since=None)
+                self.store.set_parent_state(row.apex,
+                                            now=now,
+                                            ok=True,
+                                            drift_since=None)
                 return
             self._note_drift(row, now, "parent DS or NS no longer matches")
         except ApiError as exc:
             if exc.status == 503 or exc.error == "parent_lookup_unavailable":
-                log("warning", "parent recheck unavailable", apex=row.apex, error=exc.error, message=exc.message)
+                log("warning",
+                    "parent recheck unavailable",
+                    apex=row.apex,
+                    error=exc.error,
+                    message=exc.message)
                 return
             self._note_drift(row, now, exc.error)
 
     def _note_drift(self, row, now: int, reason: str) -> None:
         since = row.parent_drift_since if row.parent_drift_since is not None else now
-        self.store.set_parent_state(row.apex, now=now, ok=False, drift_since=since)
+        self.store.set_parent_state(row.apex,
+                                    now=now,
+                                    ok=False,
+                                    drift_since=since)
         log("info", "parent drift", apex=row.apex, reason=reason, since=since)
         if now > since + self.settings.grace_seconds:
             self._drop(row.apex, now, "parent drift grace elapsed")
@@ -91,11 +106,19 @@ class Maintenance:
         if serial is None:
             return
         self.store.incr("zones_dropped")
-        log("info", "zone dropped", apex=apex, reason=reason, catalog_serial=serial)
+        log("info",
+            "zone dropped",
+            apex=apex,
+            reason=reason,
+            catalog_serial=serial)
         try:
-            self.notifier.notify(self.settings.catalog_zone.to_text(), catalog_soa(self.settings, serial))
+            self.notifier.notify(self.settings.catalog_zone.to_text(),
+                                 catalog_soa(self.settings, serial))
         except Exception as exc:
-            log("warning", "catalog NOTIFY after drop failed", apex=apex, error=str(exc))
+            log("warning",
+                "catalog NOTIFY after drop failed",
+                apex=apex,
+                error=str(exc))
 
 
 def _delegation_matches(zone, delegation, settings) -> bool:
@@ -104,9 +127,12 @@ def _delegation_matches(zone, delegation, settings) -> bool:
     service = {name.canonicalize() for name in settings.service_ns}
     if not service <= parent_ns or parent_ns != apex_ns:
         return False
-    if delegation.proved_ds_absent or delegation.ds_rrset is None or len(delegation.ds_rrset) == 0:
+    if delegation.proved_ds_absent or delegation.ds_rrset is None or len(
+            delegation.ds_rrset) == 0:
         return False
-    matched = _keys_matching_ds(zone.apex, zone.get(dns_dnskey()), list(delegation.ds_rrset), settings.ds_digest_types)
+    matched = _keys_matching_ds(zone.apex, zone.get(dns_dnskey()),
+                                list(delegation.ds_rrset),
+                                settings.ds_digest_types)
     return bool(matched)
 
 
@@ -127,12 +153,15 @@ class RemoteMaintenance:
         from dns_host.doh import DohClient
 
         self.settings = settings
-        self.lookup = lookup or DohClient(settings.resolver_base_url, settings.doh_timeout_seconds)
+        self.lookup = lookup or DohClient(settings.resolver_base_url,
+                                          settings.doh_timeout_seconds)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="maintenance", daemon=True)
+        self._thread = threading.Thread(target=self._loop,
+                                        name="maintenance",
+                                        daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -149,29 +178,31 @@ class RemoteMaintenance:
             self._stop.wait(self.settings.maintenance_interval_seconds)
 
     def run_once(self) -> None:
-        meta = _api(self.settings, "GET", "/int/zones/meta")
+        meta = _api("GET", "/int/zones/meta")
         now = self.settings.now()
         for row in meta.get("zones", []):
-            if now > int(row["rrsig_max_expiry"]) + self.settings.grace_seconds:
+            if now > int(
+                    row["rrsig_max_expiry"]) + self.settings.grace_seconds:
                 _api(
-                    self.settings,
                     "POST",
                     "/int/zones/drop",
-                    {"apexes": [row["apex"]], "reason": "rrsig grace elapsed"},
+                    {
+                        "apexes": [row["apex"]],
+                        "reason": "rrsig grace elapsed"
+                    },
                 )
                 continue
             self._recheck(row, now)
 
     def _recheck(self, row, now: int) -> None:
         import json
-        from pathlib import Path
 
         from dns_host.chain import authenticate_parent
         from dns_host.names import normalise_name
         from dns_host.zone import document_to_zone
         from dns_host.zonesync import zone_filename
 
-        path = Path(self.settings.data_dir) / "zones" / zone_filename(row["apex"])
+        path = data_dir() / "zones" / zone_filename(row["apex"])
         if not path.is_file():
             return
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -181,43 +212,59 @@ class RemoteMaintenance:
             delegation = authenticate_parent(self.lookup, self.settings, apex)
         except ApiError as exc:
             if exc.status == 503 or exc.error == "parent_lookup_unavailable":
-                log("warning", "parent recheck unavailable", apex=row["apex"], error=exc.error)
+                log("warning",
+                    "parent recheck unavailable",
+                    apex=row["apex"],
+                    error=exc.error)
                 return
             self._drift(row, now, exc.error)
             return
         if _delegation_matches(zone, delegation, self.settings):
             _api(
-                self.settings,
                 "POST",
                 "/int/zones/parent-state",
-                {"apex": row["apex"], "ok": True, "drift_since": None},
+                {
+                    "apex": row["apex"],
+                    "ok": True,
+                    "drift_since": None
+                },
             )
             return
         self._drift(row, now, "parent DS or NS no longer matches")
 
     def _drift(self, row, now: int, reason: str) -> None:
-        since = row["parent_drift_since"] if row.get("parent_drift_since") is not None else now
+        since = row["parent_drift_since"] if row.get(
+            "parent_drift_since") is not None else now
         _api(
-            self.settings,
             "POST",
             "/int/zones/parent-state",
-            {"apex": row["apex"], "ok": False, "drift_since": since},
+            {
+                "apex": row["apex"],
+                "ok": False,
+                "drift_since": since
+            },
         )
-        log("info", "parent drift", apex=row["apex"], reason=reason, since=since)
+        log("info",
+            "parent drift",
+            apex=row["apex"],
+            reason=reason,
+            since=since)
         if now > int(since) + self.settings.grace_seconds:
             _api(
-                self.settings,
                 "POST",
                 "/int/zones/drop",
-                {"apexes": [row["apex"]], "reason": "parent drift grace elapsed"},
+                {
+                    "apexes": [row["apex"]],
+                    "reason": "parent drift grace elapsed"
+                },
             )
 
 
-def _api(settings, method: str, path: str, payload: dict | None = None):
+def _api(method: str, path: str, payload: dict | None = None):
     import json
     import urllib.request
 
-    url = "http://" + settings.gunicorn_bind + path
+    url = "http://" + GUNICORN_BIND + path
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, method=method)
     if data is not None:

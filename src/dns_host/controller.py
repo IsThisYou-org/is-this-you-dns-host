@@ -18,6 +18,7 @@ import dns.message
 import dns.rdatatype
 
 from dns_host.catalogfile import Catalog, Member
+from dns_host.config import data_dir
 from dns_host.logutil import log
 from dns_host.notifyplan import plan_notifies, send_plan
 from dns_host.spool import decode_job, pending
@@ -26,10 +27,12 @@ from dns_host.wireaxfr import catalog_tcp_bytes
 
 def zone_wire_path(settings, apex: str) -> Path:
     safe = apex.strip().lower().rstrip(".").replace("/", "_")
-    return Path(settings.data_dir) / "zones" / f"{safe}.axfr"
+    del settings
+    return data_dir() / "zones" / f"{safe}.axfr"
 
 
 class Controller:
+
     def __init__(self, settings, store, notifier=None):
         self.settings = settings
         self.store = store
@@ -39,7 +42,7 @@ class Controller:
 
     @property
     def spool_dir(self) -> Path:
-        return Path(self.settings.data_dir) / "spool"
+        return data_dir() / "spool"
 
     def ensure_catalog(self) -> None:
         self.catalog.load()
@@ -94,7 +97,10 @@ class Controller:
         try:
             job = decode_job(path, path.read_bytes())
         except Exception as exc:
-            log("warning", "dropping unreadable spool file", path=str(path), error=str(exc))
+            log("warning",
+                "dropping unreadable spool file",
+                path=str(path),
+                error=str(exc))
             path.unlink(missing_ok=True)
             return False
         held = self.catalog.serial_of(job.apex)
@@ -119,7 +125,10 @@ class Controller:
         )
         self._remember_sqlite(job)
         path.unlink(missing_ok=True)
-        log("info", "zone installed from spool", apex=job.apex, serial=job.serial)
+        log("info",
+            "zone installed from spool",
+            apex=job.apex,
+            serial=job.serial)
         return True
 
     def _install_wire(self, apex: str, wire: bytes) -> None:
@@ -130,7 +139,8 @@ class Controller:
         os.replace(temporary, destination)
 
     def _remember_sqlite(self, job) -> None:
-        document, min_expiry, max_expiry = _document_from_wire(job.apex, job.wire)
+        document, min_expiry, max_expiry = _document_from_wire(
+            job.apex, job.wire)
         if max_expiry <= 0:
             max_expiry = job.expires_at
             min_expiry = job.expires_at
@@ -157,11 +167,15 @@ class Controller:
             self.catalog.zones.pop(apex, None)
             zone_wire_path(self.settings, apex).unlink(missing_ok=True)
             self.store.delete_zone(apex, now)
-            log("info", "zone aged out", apex=apex, reason="rrsig grace elapsed")
+            log("info",
+                "zone aged out",
+                apex=apex,
+                reason="rrsig grace elapsed")
         return True
 
     def _write_catalog_wire(self) -> None:
-        blob = catalog_tcp_bytes(self.settings, self.catalog.serial, self.catalog.member_names())
+        blob = catalog_tcp_bytes(self.settings, self.catalog.serial,
+                                 self.catalog.member_names())
         atomic_write_bytes(self.catalog.wire_path, blob)
 
 
@@ -178,9 +192,9 @@ def _document_from_wire(apex: str, wire: bytes) -> tuple[dict, int, int]:
     offset = 0
     seen_soa = False
     while offset + 2 <= len(wire):
-        length = int.from_bytes(wire[offset : offset + 2], "big")
+        length = int.from_bytes(wire[offset:offset + 2], "big")
         offset += 2
-        message = dns.message.from_wire(wire[offset : offset + length])
+        message = dns.message.from_wire(wire[offset:offset + length])
         offset += length
         for rrset in message.answer:
             if int(rrset.rdtype) == int(dns.rdatatype.SOA):
@@ -189,7 +203,10 @@ def _document_from_wire(apex: str, wire: bytes) -> tuple[dict, int, int]:
                 seen_soa = True
             type_name = dns.rdatatype.to_text(rrset.rdtype)
             key = (rrset.name.to_text(), type_name)
-            encoded = [base64.b64encode(rdata.to_wire()).decode("ascii") for rdata in rrset]
+            encoded = [
+                base64.b64encode(rdata.to_wire()).decode("ascii")
+                for rdata in rrset
+            ]
             bucket = grouped.get(key)
             if bucket is None:
                 grouped[key] = {
@@ -205,7 +222,10 @@ def _document_from_wire(apex: str, wire: bytes) -> tuple[dict, int, int]:
             if int(rrset.rdtype) == int(dns.rdatatype.RRSIG):
                 for rdata in rrset:
                     expiries.append(int(rdata.expiration))
-    document = {"apex": apex, "rrsets": [grouped[key] for key in sorted(grouped)]}
+    document = {
+        "apex": apex,
+        "rrsets": [grouped[key] for key in sorted(grouped)]
+    }
     if not expiries:
         return document, 0, 0
     return document, min(expiries), max(expiries)

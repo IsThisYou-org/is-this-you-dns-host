@@ -6,9 +6,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_nginx_is_plain_http_and_trusts_only_configured_proxies():
-    text = render(80,
-                  1048576, ["172.28.9.0/24", "10.1.2.3/32"],
-                  internal_port=8081)
+    text = render(1048576, ["172.28.9.0/24", "10.1.2.3/32"])
     assert "listen 80;" in text
     assert "listen 127.0.0.1:8081;" in text
     assert "user nginx;" in text
@@ -44,6 +42,6 @@ def test_read_only_root_uses_dev_shm_and_an_explicit_gunicorn_socket():
 
 
 def test_nginx_without_trusted_proxies_does_not_rewrite_addresses():
-    text = render(80, 100, [])
+    text = render(100, [])
     assert "\n        set_real_ip_from " not in text
     assert "listen 80;" in text

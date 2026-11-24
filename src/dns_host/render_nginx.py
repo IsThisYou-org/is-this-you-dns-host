@@ -15,15 +15,12 @@ from __future__ import annotations
 
 import sys
 
-from dns_host.config import Settings
+from dns_host.config import GUNICORN_BIND, HTTP_PORT, INTERNAL_HTTP_PORT, Settings
 
 
 def render(
-    listen_port: int,
     max_body_bytes: int,
     trusted_proxies: list[str],
-    upstream: str = "127.0.0.1:8000",
-    internal_port: int = 8081,
 ) -> str:
     real_ip = [
         "        real_ip_header X-Forwarded-For;",
@@ -70,7 +67,7 @@ http {{
 
     # External: the TLS shedder's upstream. /api/ is the public /ext/ tree.
     server {{
-        listen {int(listen_port)};
+        listen {HTTP_PORT};
         client_max_body_size {int(max_body_bytes)};
 {real_ip_block}
         error_page 413 =413 @too_large;
@@ -81,7 +78,7 @@ http {{
         }}
 
         location = /health {{
-            proxy_pass http://{upstream}/ext/health;
+            proxy_pass http://{GUNICORN_BIND}/ext/health;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -92,7 +89,7 @@ http {{
         }}
 
         location = /config {{
-            proxy_pass http://{upstream}/ext/config;
+            proxy_pass http://{GUNICORN_BIND}/ext/config;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -103,7 +100,7 @@ http {{
         }}
 
         location = /metrics {{
-            proxy_pass http://{upstream}/ext/metrics;
+            proxy_pass http://{GUNICORN_BIND}/ext/metrics;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -114,7 +111,7 @@ http {{
         }}
 
         location /api/ {{
-            proxy_pass http://{upstream}/ext/;
+            proxy_pass http://{GUNICORN_BIND}/ext/;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -132,11 +129,11 @@ http {{
 
     # Internal: localhost only. /api/ is the /int/ tree (expire and delete).
     server {{
-        listen 127.0.0.1:{int(internal_port)};
+        listen 127.0.0.1:{INTERNAL_HTTP_PORT};
         client_max_body_size {int(max_body_bytes)};
 
         location /api/ {{
-            proxy_pass http://{upstream}/int/;
+            proxy_pass http://{GUNICORN_BIND}/int/;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -152,11 +149,8 @@ def main() -> None:
     settings = Settings.load()
     sys.stdout.write(
         render(
-            settings.http_port,
             settings.max_body_bytes,
             list(settings.trusted_proxies),
-            upstream=settings.gunicorn_bind,
-            internal_port=settings.internal_http_port,
         ))
 
 

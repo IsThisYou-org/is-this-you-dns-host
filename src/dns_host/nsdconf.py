@@ -11,12 +11,13 @@ import os
 import subprocess
 from pathlib import Path
 
-from dns_host.config import DNS_BIND, DNS_PORT
+from dns_host.config import DNS_BIND, DNS_PORT, NSD_BIND, NSD_PORT, data_dir
 from dns_host.zonesync import atomic_write
 
 
 def nsd_conf_path(settings) -> Path:
-    return Path(settings.data_dir) / "nsd" / "nsd.conf"
+    del settings
+    return data_dir() / "nsd" / "nsd.conf"
 
 
 def _endpoint(host: str, port: int) -> str:
@@ -40,27 +41,27 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
         "server:",
         "    server-count: 1",
         "    hide-version: yes",
-        f"    ip-address: {settings.nsd_bind}",
-        f"    port: {int(settings.nsd_port)}",
+        f"    ip-address: {NSD_BIND}",
+        f"    port: {int(NSD_PORT)}",
         "    do-ip4: yes",
         "    do-ip6: no",
         "    verbosity: 2",
         "    log-only-syslog: yes",
-        f'    zonesdir: "{Path(settings.data_dir) / "nsd" / "zones"}"',
-        f'    xfrdir: "{Path(settings.data_dir) / "nsd" / "xfr"}"',
-        f'    cookie-secret-file: "{Path(settings.data_dir) / "nsd" / "cookiesecrets.txt"}"',
+        f'    zonesdir: "{data_dir() / "nsd" / "zones"}"',
+        f'    xfrdir: "{data_dir() / "nsd" / "xfr"}"',
+        f'    cookie-secret-file: "{data_dir() / "nsd" / "cookiesecrets.txt"}"',
         '    pidfile: "/run/nsd/nsd.pid"',
-        f'    xfrdfile: "{Path(settings.data_dir) / "nsd" / "xfrd.state"}"',
-        f'    zonelistfile: "{Path(settings.data_dir) / "nsd" / "zone.list"}"',
+        f'    xfrdfile: "{data_dir() / "nsd" / "xfrd.state"}"',
+        f'    zonelistfile: "{data_dir() / "nsd" / "zone.list"}"',
         "    username: nsd",
         "",
         "remote-control:",
         "    control-enable: yes",
         "    control-interface: /run/nsd/nsd.control",
-        f'    server-key-file: "{Path(settings.data_dir) / "nsd" / "nsd_server.key"}"',
-        f'    server-cert-file: "{Path(settings.data_dir) / "nsd" / "nsd_server.pem"}"',
-        f'    control-key-file: "{Path(settings.data_dir) / "nsd" / "nsd_control.key"}"',
-        f'    control-cert-file: "{Path(settings.data_dir) / "nsd" / "nsd_control.pem"}"',
+        f'    server-key-file: "{data_dir() / "nsd" / "nsd_server.key"}"',
+        f'    server-cert-file: "{data_dir() / "nsd" / "nsd_server.pem"}"',
+        f'    control-key-file: "{data_dir() / "nsd" / "nsd_control.key"}"',
+        f'    control-cert-file: "{data_dir() / "nsd" / "nsd_control.pem"}"',
         "",
     ]
     seen_keys: set[str] = set()

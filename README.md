@@ -26,12 +26,12 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 
 | Port | Bind | Process | Published |
 | --- | --- | --- | --- |
-| 53/udp, 53/tcp | `0.0.0.0` | NSD, the public relay | yes |
-| 80/tcp | `0.0.0.0` | nginx external listener (`/api/` is the `/ext/` tree) | yes |
+| 53/udp, 53/tcp | `0.0.0.0` | NSD, the public relay. Fixed address. | yes |
+| 80/tcp | `0.0.0.0` | nginx external listener (`/api/` is the `/ext/` tree). Fixed address. | yes |
 | 5353/udp | `127.0.0.1` | UDP service: SOA answers and NOTIFY. Fixed address. Not published. | no |
 | 5353/tcp | `127.0.0.1` | Pre-fork AXFR service (default 5 children). Fixed address. IXFR is not requested. Localhost AXFR is always allowed. | no |
-| 8081/tcp | `127.0.0.1` | nginx internal listener (`/api/` is the `/int/` tree) | no |
-| 8000/tcp | `127.0.0.1` | gunicorn | no |
+| 8081/tcp | `127.0.0.1` | nginx internal listener (`/api/` is the `/int/` tree). Fixed address. Not published. | no |
+| 8000/tcp | `127.0.0.1` | gunicorn. Fixed address. Not published. | no |
 
 Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
 
@@ -55,7 +55,7 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 nginx presents each application tree as `/api/` on its own listener.
 
 * External, port 80: `GET /health`, `GET /config`, `GET /metrics`, `POST /api/v1/zones/{apex}`, and the same paths under `/ext/` on gunicorn.
-* Internal, `127.0.0.1:8081`: `POST /api/zones/drop` and `POST /api/zones/parent-state` (gunicorn paths `/int/zones/...`). Expire and delete are not on the public listener.
+* Internal, `127.0.0.1:8081` (fixed): `POST /api/zones/drop` and `POST /api/zones/parent-state` (gunicorn paths `/int/zones/...`). Expire and delete are not on the public listener. gunicorn listens on `127.0.0.1:8000`, which is also fixed.
 
 `/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. `/metrics` reports upload, lookup, AXFR, NOTIFY and grace counters.
 
@@ -63,7 +63,7 @@ nginx presents each application tree as `/api/` on its own listener.
 
 ## Configuration
 
-`/opt/data/etc/config.yaml` is the configuration. Environment variables are not read. TSIG secrets may be inline or in `tsig_secret_file` (a Docker secret mount is a normal place). They are never taken from a zone upload.
+`/opt/data/etc/config.yaml` is the configuration. Environment variables are not read. A secondary's TSIG secret may be inline or in `tsig_secret_file` (a Docker secret mount is a normal place). Secrets are never taken from a zone upload. Port 80, NSD (`0.0.0.0:53`), the data directory (`/opt/data`), and the ICANN trust-anchor file (`/app/deploy/root-anchors.ds`) are fixed by the image. They are not configuration keys.
 
 | Key | Default | Role |
 | --- | --- | --- |
@@ -72,7 +72,6 @@ nginx presents each application tree as `/api/` on its own listener.
 | `resolver_base_url` | `https://api.isthisyou.org/` | DoH JSON resolver for parent lookups. |
 | `catalog_zone` | `catalog.example.net.` | Catalog zone apex (RFC 9432). |
 | `trusted_proxies` | empty | CIDRs allowed to supply `X-Forwarded-For` / `X-Forwarded-Proto` on the external listener. |
-| `trust_anchor_file` | image copy of the IANA root DS set | DS records for the ICANN root. |
 | `grace_days` | `90` | How long to keep serving after RRSIG expiry or parent DS/NS drift. |
 | `max_body_bytes` / `max_rrsets` / `max_names` / `max_rdata_bytes` | 1 MiB / 2000 / 1000 / 4096 | Upload and rdata caps. |
 | `log_level` | `info` | Minimum severity for application logs and the gunicorn error, access, and root loggers. |
@@ -156,7 +155,7 @@ On success the API writes wire-format AXFR data into the spool (an empty `mktemp
 
 ## Secondaries
 
-NOTIFY is UDP, from the UDP service: the catalog first when its serial changes, then each new or updated member. NSD's `provide-xfr` and `notify` lines are generated from the one secondary list, on the catalog zone and on the member pattern. NSD itself requests only AXFR (`request-xfr: AXFR`) from `127.0.0.1:5353`. Public AXFR is answered by NSD, not by the hidden TCP service. A bad TSIG on NSD's side is refused. Set `axfr_require_tsig: true` on the secondaries' keys when you want TSIG as well as the address.
+NOTIFY is UDP, from the UDP service: the catalog first when its serial changes, then each new or updated member. NSD's `provide-xfr` and `notify` lines are generated from the one secondary list, on the catalog zone and on the member pattern. NSD itself requests only AXFR (`request-xfr: AXFR`) from `127.0.0.1:5353`. Public AXFR is answered by NSD, not by the hidden TCP service. A bad TSIG on NSD's side is refused. TSIG is configured on each secondary (key name, secret or `tsig_secret_file`, and algorithm). There is no global TSIG key.
 
 The catalog is schema version 2 (`version.<catalog> TXT "2"`, member PTRs at `<label>.zones.<catalog>`). It is not signed. The tests speak AXFR with dnspython. NSD on port 53 is what a real secondary talks to.
 
