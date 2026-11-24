@@ -141,6 +141,7 @@ def test_provide_xfr_and_notify_come_from_one_secondary_list():
     assert 'name: "user.example"' in text
     assert 'zonefile: "c6/3c/user.example.axfr"' in text
     assert 'zonefile: "86/3d/catalog.example.net.axfr"' in text
+    assert "zonefiles-write: 60" in text
     assert "%1" not in text
     assert '%s' not in text
     provide = [

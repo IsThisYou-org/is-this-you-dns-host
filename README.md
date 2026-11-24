@@ -46,7 +46,7 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | `/opt/data/spool` | Validated AXFR payloads, one uniquely named job per upload. `tmp/` holds the file before `rename`. Not sharded. |
 | `/opt/data/zones` | Installed zone wire and JSON under `<hh>/<ll>/`. `catalogue.json` stays in this directory. |
 | `/opt/data/catalog` | Catalog file (zone names and full SOA records) and its mtime, which is the catalog SOA serial. One catalog, not sharded. |
-| `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transferred zones under `zones/<hh>/<ll>/` |
+| `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transfer state. NSD's on-disk zone copies are `zones/<hh>/<ll>/`. |
 | `/opt/data/log` | Syslog output |
 | `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
 | `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the generated nginx config (`/run/nginx/nginx.conf`), nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
@@ -68,6 +68,8 @@ For `james.isthisyou.me` the FNV-1a 32-bit hash is `0x9d00b292`, the folded valu
 Directories are created when a file is written. Writes stay under `/opt/data` (or on the `/run` and `/tmp` tmpfs). On startup, flat files already sitting in those directories are moved into the shard. The move is safe to run again: a second pass finds nothing to move, and a shard copy that already matches is kept.
 
 NSD `zonefile` patterns expand `%s`, `%1`, `%2`, `%3`, `%z`, `%y`, and `%x`. Those are the zone name, single characters, and labels. Generated `nsd.conf` therefore gives every zone its own `zonefile:` line with the path above. The catalog zone is still a catalog consumer. Member zones include the `catalog-member` pattern and override `zonefile` with the explicit path. When the member set changes, the controller rewrites `nsd.conf` and reloads NSD.
+
+`zonesdir` is `/opt/data/nsd/zones`. `zonefiles-write: 60` stores a changed zone to its `zonefile` within 60 seconds. The `hh/ll` directory is created when that config is written and is owned by the `nsd` user, the account NSD drops to after it binds port 53. On restart NSD reads those files into memory, then runs the normal SOA refresh against `127.0.0.1:5353`. It AXFRs when the serial on that primary is newer. The hidden primary's own copy remains `/opt/data/zones`.
 
 The spool is a queue of uniquely named job files, one per upload, so it stays a single directory. Cron runs every 15 minutes. It deletes empty files older than five minutes at the top of `/opt/data/spool` (`find -maxdepth 1`) and files older than five minutes under `spool/tmp`. NSD's `xfrdir` holds transfer temps named `nsd-xfr-<pid>/xfr.<n>`, which are not one file per zone. A flat zone file left in that directory is moved into the same shard on startup.
 
@@ -179,7 +181,7 @@ On success the API writes wire-format AXFR data into the spool (an empty `mktemp
 | Zone controller | one process | Polls the spool, ignores empty files, directories and hidden names, re-checks the SOA serial, installs the zone, ages out zones expired for more than 90 days. |
 | DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
 | DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
-| NSD | one process | Public port 53. Catalog consumer plus one zone entry per member, each with a sharded `zonefile`. Reloaded when that set changes. Remote control listens on `127.0.0.1:8952`. |
+| NSD | one process | Public port 53. Catalog consumer plus one zone entry per member, each with a sharded `zonefile`. Writes those files every 60 seconds and loads them on restart, then checks SOA. Reloaded when the member set changes. Remote control listens on `127.0.0.1:8952`. |
 | cron | busybox `crond` | Every 15 minutes, deletes empty spool files and orphaned `tmp` files older than five minutes. |
 
 ## Secondaries

@@ -9,6 +9,7 @@ JSON is not an input.
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +25,10 @@ from dns_host.config import (
 )
 from dns_host.shard import canonical_zone, relative_zonefile
 from dns_host.zonesync import atomic_write
+
+# How often NSD writes a changed secondary zone to its zonefile. The file is
+# what NSD reads after a restart; the next SOA check decides whether to AXFR.
+ZONEFILES_WRITE_SECONDS = 60
 
 
 def nsd_conf_path(settings) -> Path:
@@ -59,6 +64,7 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
         "    verbosity: 2",
         "    log-only-syslog: yes",
         f'    zonesdir: "{data_dir() / "nsd" / "zones"}"',
+        f"    zonefiles-write: {ZONEFILES_WRITE_SECONDS}",
         f'    xfrdir: "{data_dir() / "nsd" / "xfr"}"',
         f'    cookie-secret-file: "{data_dir() / "nsd" / "cookiesecrets.txt"}"',
         '    pidfile: "/run/nsd/nsd.pid"',
@@ -159,11 +165,56 @@ def _member_names(catalog_name: str,
     return sorted(members)
 
 
+def nsd_zones_dir() -> Path:
+    return data_dir() / "nsd" / "zones"
+
+
+def ensure_nsd_zone_dirs(names: list[str]) -> None:
+    """Create ``hh/ll`` under the NSD zonesdir and give them to the nsd user.
+
+    NSD writes the zonefile at the configured relative path. Those parent
+    directories have to exist first, and the nsd user has to be able to
+    create the file after it drops privileges.
+    """
+
+    root = nsd_zones_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    _chown_nsd(root)
+    seen: set[Path] = set()
+    for name in names:
+        try:
+            relative = relative_zonefile(name)
+        except ValueError:
+            continue
+        directory = (root / relative).parent
+        if directory in seen:
+            continue
+        seen.add(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        _chown_nsd(directory.parent)
+        _chown_nsd(directory)
+
+
+def _chown_nsd(path: Path) -> None:
+    try:
+        account = pwd.getpwnam("nsd")
+    except KeyError:
+        return
+    try:
+        os.chown(path, account.pw_uid, account.pw_gid)
+    except OSError:
+        return
+
+
 def write_nsd_config(settings, zone_names: list[str] | None = None) -> Path:
     """Write nsd.conf, including an explicit zonefile path for each member."""
 
     path = nsd_conf_path(settings)
     atomic_write(path, render_nsd(settings, zone_names))
+    names = [settings.catalog_zone.to_text()]
+    if zone_names:
+        names.extend(zone_names)
+    ensure_nsd_zone_dirs(names)
     return path
 
 

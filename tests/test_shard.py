@@ -46,6 +46,8 @@ def test_render_nsd_emits_explicit_zonefile_paths():
     assert 'name: "user.example"' in text
     assert 'include-pattern: "catalog-member"' in text
     assert text.count("\nzone:") == 2
+    assert "zonefiles-write: 60" in text
+    assert 'zonesdir: "/opt/data/nsd/zones"' in text
     assert "%1" not in text
     assert "%s" not in text
 
@@ -157,6 +159,8 @@ def test_controller_install_and_delete_use_the_shard(tmp_path, monkeypatch):
     assert document.is_file()
     conf = (tmp_path / "nsd" / "nsd.conf").read_text(encoding="utf-8")
     assert 'zonefile: "2f/92/james.isthisyou.me.axfr"' in conf
+    assert "zonefiles-write: 60" in conf
+    assert (tmp_path / "nsd" / "zones" / "2f" / "92").is_dir()
     assert "%1" not in conf
 
     flat = tmp_path / "zones" / "james.isthisyou.me.axfr"
@@ -174,6 +178,8 @@ def test_readme_and_cron_document_the_layout():
     assert "0x2f92" in readme
     assert "2f/92/" in readme
     assert "FNV-1a" in readme
+    assert "zonefiles-write: 60" in readme
+    assert "127.0.0.1:5353" in readme
     assert "(hash >> 16) ^ (hash & 0xFFFF)" in readme
     assert "every 15 minutes" in readme.lower() or "Every 15 minutes" in readme
     cron = (root / "deploy" / "crontabs" / "root").read_text(encoding="utf-8")
