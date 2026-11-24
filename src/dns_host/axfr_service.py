@@ -1,9 +1,10 @@
 """DNS TCP AXFR process.
 
-The listening socket is bound to 127.0.0.1 and is non-blocking. A parent
-forks the configured number of children (default 5). Each child ``select``s
-the listening socket and then ``accept``s; a failed accept means a sibling
-took the connection, and the child loops. Dead children are replaced.
+The listening socket is bound to 127.0.0.1 port 5353 and is non-blocking.
+Localhost AXFR is always accepted. A parent forks the configured number of
+children (default 5). Each child ``select``s the listening socket and then
+``accept``s; a failed accept means a sibling took the connection, and the
+child loops. Dead children are replaced.
 
 AXFR bytes for user zones were built by the API. The catalog AXFR is the
 RFC 9432 payload written by the controller. Children reload the catalog when
@@ -23,6 +24,7 @@ import dns.rdataclass
 import dns.rdatatype
 
 from dns_host.catalogfile import Catalog
+from dns_host.config import DNS_BIND, DNS_PORT
 from dns_host.logutil import log
 from dns_host.wireaxfr import with_query_id
 
@@ -55,7 +57,8 @@ class CatalogView:
         if apex == self.settings.catalog_zone.to_text():
             from dns_host.wireaxfr import catalog_tcp_bytes
 
-            return catalog_tcp_bytes(self.settings, self.catalog.serial, self.catalog.member_names())
+            return catalog_tcp_bytes(self.settings, self.catalog.serial,
+                                     self.catalog.member_names())
         from dns_host.controller import zone_wire_path
 
         path = zone_wire_path(self.settings, apex)
@@ -66,18 +69,20 @@ class CatalogView:
 
 
 def bind_listener(settings) -> socket.socket:
+    """Bind the fixed internal listener. ``settings`` is accepted for callers."""
+
+    del settings
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    host = settings.dns_bind or "127.0.0.1"
-    if host in {"0.0.0.0", "::", ""}:
-        host = "127.0.0.1"
-    sock.bind((host, int(settings.dns_port or 0)))
+    sock.bind((DNS_BIND, DNS_PORT))
     sock.listen(64)
     sock.setblocking(False)
     return sock
 
 
-def run_child(sock: socket.socket, settings, stop: threading.Event | None = None) -> None:
+def run_child(sock: socket.socket,
+              settings,
+              stop: threading.Event | None = None) -> None:
     view = CatalogView(settings)
     while stop is None or not stop.is_set():
         view.refresh()
@@ -101,7 +106,8 @@ def run_child(sock: socket.socket, settings, stop: threading.Event | None = None
                 pass
 
 
-def handle_connection(conn: socket.socket, view: CatalogView, settings) -> None:
+def handle_connection(conn: socket.socket, view: CatalogView,
+                      settings) -> None:
     conn.settimeout(10)
     header = _read_exact(conn, 2)
     if header is None:
@@ -153,7 +159,10 @@ def prefork(settings, sock: socket.socket | None = None) -> None:
     if sock is None:
         sock = bind_listener(settings)
     children = max(1, int(getattr(settings, "axfr_children", 5) or 5))
-    log("info", "DNS AXFR service started", port=sock.getsockname()[1], children=children)
+    log("info",
+        "DNS AXFR service started",
+        port=sock.getsockname()[1],
+        children=children)
 
     def spawn() -> int:
         pid = os.fork()

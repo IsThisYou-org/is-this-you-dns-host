@@ -5,7 +5,7 @@ import json
 import dns.name
 import pytest
 
-from dns_host.config import Secondary, Settings
+from dns_host.config import DNS_BIND, DNS_PORT, Secondary, Settings
 from dns_host.dns_server import DnsServer
 from dns_host.nsdconf import render_nsd
 from dns_host.zonesign import generate_key
@@ -16,8 +16,11 @@ from tests.test_axfr_grace import _records, _xfr
 def test_default_resolver_and_ports():
     settings = Settings()
     assert settings.resolver_base_url == "https://api.isthisyou.org/"
-    assert settings.dns_bind == "127.0.0.1"
-    assert settings.dns_port == 5353
+    assert DNS_BIND == "127.0.0.1"
+    assert DNS_PORT == 5353
+    assert not hasattr(settings, "dns_bind")
+    assert not hasattr(settings, "dns_port")
+    assert not hasattr(settings, "allow_localhost_xfr")
     assert settings.nsd_port == 53
     assert settings.http_port == 80
     assert "web3dns.net" not in settings.resolver_base_url
@@ -50,17 +53,16 @@ def test_algorithm_15_is_accepted(env):
         ("TYPE65280", "\\# 1 AA"),
     ],
 )
-def test_obsolete_and_private_types_are_rejected_before_signatures(env, rdtype, rdata):
+def test_obsolete_and_private_types_are_rejected_before_signatures(
+        env, rdtype, rdata):
     body = env.lab.zone()
-    body["rrsets"].append(
-        {
-            "kind": "dns#resourceRecordSet",
-            "name": "user.example.",
-            "type": rdtype,
-            "ttl": 300,
-            "rrdatas": [rdata],
-        }
-    )
+    body["rrsets"].append({
+        "kind": "dns#resourceRecordSet",
+        "name": "user.example.",
+        "type": rdtype,
+        "ttl": 300,
+        "rrdatas": [rdata],
+    })
     response = post(env, body)
     assert response.status_code == 422, response.get_json()
     assert response.get_json()["error"] == "type_not_allowed"
@@ -69,9 +71,8 @@ def test_obsolete_and_private_types_are_rejected_before_signatures(env, rdtype, 
 
 def test_uri_and_wallet_are_apex_only(env):
     apex = env.lab.apex.to_text()
-    uri = env.lab.zone(
-        extras=[(f"_web._tcp.{apex}", "URI", ['10 1 "https://example.org/j"'])]
-    )
+    uri = env.lab.zone(extras=[(f"_web._tcp.{apex}", "URI",
+                                ['10 1 "https://example.org/j"'])])
     response = post(env, uri)
     assert response.status_code == 422, response.get_json()
     assert response.get_json()["error"] == "type_not_allowed"
@@ -90,14 +91,19 @@ def test_uri_and_wallet_are_apex_only(env):
 def test_provide_xfr_and_notify_come_from_one_secondary_list():
     settings = Settings(
         secondaries=[
-            Secondary("192.0.2.10", 53, tsig_key_name="one.example.", tsig_secret="c2VjcmV0MQ=="),
+            Secondary("192.0.2.10",
+                      53,
+                      tsig_key_name="one.example.",
+                      tsig_secret="c2VjcmV0MQ=="),
             Secondary("192.0.2.11", 5353),
         ],
-        dns_port=5353,
         nsd_port=53,
         catalog_zone=dns.name.from_text("catalog.example.net."),
     )
-    upload = {"tsig_secret": "from-the-zone-json", "secondaries": ["198.51.100.9"]}
+    upload = {
+        "tsig_secret": "from-the-zone-json",
+        "secondaries": ["198.51.100.9"]
+    }
     text = render_nsd(settings, ["catalog.example.net.", "user.example."])
     assert upload["tsig_secret"] not in text
     assert "198.51.100.9" not in text
@@ -107,13 +113,11 @@ def test_provide_xfr_and_notify_come_from_one_secondary_list():
     assert text.count("\nzone:") == 1
     assert "user.example" not in text
     provide = [
-        line.split("provide-xfr:", 1)[1].strip()
-        for line in text.splitlines()
+        line.split("provide-xfr:", 1)[1].strip() for line in text.splitlines()
         if line.strip().startswith("provide-xfr:")
     ]
     notify = [
-        line.split("notify:", 1)[1].strip()
-        for line in text.splitlines()
+        line.split("notify:", 1)[1].strip() for line in text.splitlines()
         if line.strip().startswith("notify:")
     ]
     assert provide == notify
@@ -127,12 +131,16 @@ def test_internal_drop_updates_the_catalogue(env):
     env.notifier.zones.clear()
     response = env.client.post(
         "/int/zones/drop",
-        json={"apexes": ["user.example."], "reason": "test"},
+        json={
+            "apexes": ["user.example."],
+            "reason": "test"
+        },
     )
     assert response.status_code == 200, response.get_json()
     assert env.store.get_zone("user.example.") is None
     assert env.notifier.zones == ["catalog.svc.test."]
-    catalogue = json.loads((env.settings.data_dir / "catalog" / "catalog.json").read_text())
+    catalogue = json.loads(
+        (env.settings.data_dir / "catalog" / "catalog.json").read_text())
     assert catalogue["zones"] == []
 
 
@@ -141,7 +149,8 @@ def test_dns_serves_the_catalogue_file(env):
     server = DnsServer(env.settings, env.store)
     server.start()
     try:
-        assert any(rdtype == "SOA" for _name, rdtype, _text in _records(_xfr(server.port, "user.example.")))
+        assert any(rdtype == "SOA" for _name, rdtype, _text in _records(
+            _xfr(server.port, "user.example.")))
         path = env.settings.data_dir / "catalog" / "catalog.json"
         data = json.loads(path.read_text())
         data["zones"] = []

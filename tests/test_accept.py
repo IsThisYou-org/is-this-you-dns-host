@@ -38,3 +38,12 @@ def test_health_and_metrics(env):
     metrics = env.client.get("/metrics")
     assert metrics.status_code == 200
     assert "uploads_ok" in metrics.get_json()
+
+
+def test_config_lists_service_nameservers(env):
+    response = env.client.get("/config")
+    assert response.status_code == 200
+    assert response.get_json() == {"ns": ["ns1.svc.test.", "ns2.svc.test."]}
+    assert response.headers["Cache-Control"] == "public, max-age=300"
+    missing = env.client.get("/v1/config")
+    assert missing.status_code == 404

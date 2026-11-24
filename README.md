@@ -28,8 +28,8 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 | --- | --- | --- | --- |
 | 53/udp, 53/tcp | `0.0.0.0` | NSD, the public relay | yes |
 | 80/tcp | `0.0.0.0` | nginx external listener (`/api/` is the `/ext/` tree) | yes |
-| 5353/udp | `127.0.0.1` | UDP service: SOA answers and NOTIFY. Not published. | no |
-| 5353/tcp | `127.0.0.1` | Pre-fork AXFR service (default 5 children). IXFR is not requested. | no |
+| 5353/udp | `127.0.0.1` | UDP service: SOA answers and NOTIFY. Fixed address. Not published. | no |
+| 5353/tcp | `127.0.0.1` | Pre-fork AXFR service (default 5 children). Fixed address. IXFR is not requested. Localhost AXFR is always allowed. | no |
 | 8081/tcp | `127.0.0.1` | nginx internal listener (`/api/` is the `/int/` tree) | no |
 | 8000/tcp | `127.0.0.1` | gunicorn | no |
 
@@ -54,10 +54,12 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 
 nginx presents each application tree as `/api/` on its own listener.
 
-* External, port 80: `GET /health`, `GET /metrics`, `POST /api/v1/zones/{apex}`, and the same paths under `/ext/` on gunicorn.
+* External, port 80: `GET /health`, `GET /config`, `GET /metrics`, `POST /api/v1/zones/{apex}`, and the same paths under `/ext/` on gunicorn.
 * Internal, `127.0.0.1:8081`: `POST /api/zones/drop` and `POST /api/zones/parent-state` (gunicorn paths `/int/zones/...`). Expire and delete are not on the public listener.
 
 `/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. `/metrics` reports upload, lookup, AXFR, NOTIFY and grace counters.
+
+`GET /config` is unauthenticated and is not under `/v1`. It returns `{"ns": ["ns1.example.net.", ...]}` from the configured `service_ns` list, in that order, and sets `Cache-Control: public, max-age=300`.
 
 ## Configuration
 

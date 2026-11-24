@@ -16,28 +16,26 @@ from tests.test_axfr_grace import _records
 
 def test_wallet_two_and_four_strings_and_apex_uri(env):
     apex = env.lab.apex.to_text()
-    body = env.lab.zone(
-        extras=[
-            (apex, "URI", ['10 1 "https://example.org/j"']),
-            (
-                apex,
-                "WALLET",
-                [
-                    '"btc" "bc1qexampleaddress"',
-                    '"eth" "0xabc" "cold wallet" "20"',
-                ],
-            ),
-        ]
-    )
+    body = env.lab.zone(extras=[
+        (apex, "URI", ['10 1 "https://example.org/j"']),
+        (
+            apex,
+            "WALLET",
+            [
+                '"btc" "bc1qexampleaddress"',
+                '"eth" "0xabc" "cold wallet" "20"',
+            ],
+        ),
+    ])
     response = post(env, body)
     assert response.status_code == 201, response.get_json()
     server = DnsServer(env.settings, env.store)
-    server.start()
+    port = server.start()
     try:
         messages = dns.query.xfr(
             "127.0.0.1",
             "user.example.",
-            port=env.settings.dns_port,
+            port=port,
             timeout=2,
             relativize=False,
         )
@@ -45,7 +43,10 @@ def test_wallet_two_and_four_strings_and_apex_uri(env):
     finally:
         server.stop()
     wallets = [text for _name, rdtype, text in records if rdtype == "WALLET"]
-    uris = [text for name, rdtype, text in records if rdtype == "URI" and name == apex]
+    uris = [
+        text for name, rdtype, text in records
+        if rdtype == "URI" and name == apex
+    ]
     assert uris, records
     assert any("bc1qexampleaddress" in text for text in wallets)
     assert any("cold wallet" in text and "0xabc" in text for text in wallets)
@@ -66,15 +67,19 @@ def test_generic_wallet_wire_matches_native_and_signs(monkeypatch):
     import dns_host.rrtypes as rrtypes
 
     monkeypatch.setattr(rrtypes, "_force_generic_wallet", True)
-    samples = ['"btc" "bc1qexampleaddress"', '"eth" "0xabc" "cold wallet" "20"']
+    samples = [
+        '"btc" "bc1qexampleaddress"', '"eth" "0xabc" "cold wallet" "20"'
+    ]
     generic = [rdata_from_text("WALLET", text) for text in samples]
     native = [dns.rdata.from_text("IN", "WALLET", text) for text in samples]
     assert all(isinstance(item, dns.rdata.GenericRdata) for item in generic)
-    assert [item.to_wire() for item in generic] == [item.to_wire() for item in native]
+    assert [item.to_wire()
+            for item in generic] == [item.to_wire() for item in native]
     owner = dns.name.from_text("user.example.")
     rrset = dns.rrset.from_rdata(owner, 300, *generic)
     private, dnskey = generate_key(256)
-    signature = sign_rrset(rrset, private, dnskey, owner, 1_700_000_000, 1_700_000_000 + 86400)
+    signature = sign_rrset(rrset, private, dnskey, owner, 1_700_000_000,
+                           1_700_000_000 + 86400)
     dns.dnssec.validate(
         rrset,
         dns.rrset.from_rdata(owner, 300, signature),

@@ -22,34 +22,36 @@ import dns.rrset
 
 from dns_host.catalog import catalog_soa
 from dns_host.catalogfile import Catalog
+from dns_host.config import DNS_BIND, DNS_PORT
 from dns_host.logutil import log
 from dns_host.notify import UdpNotifier
 from dns_host.notifyplan import plan_notifies, send_plan
 
 
 class UdpService:
+
     def __init__(self, settings, notifier=None):
         self.settings = settings
         self.catalog = Catalog(settings)
-        self.notifier = notifier if notifier is not None else UdpNotifier(settings, _NullStore())
+        self.notifier = notifier if notifier is not None else UdpNotifier(
+            settings, _NullStore())
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
-        self.port = settings.dns_port
+        self.port = DNS_PORT
         self._snapshot = (0, ())
 
     def start(self) -> int:
         self.catalog.load()
         self._snapshot = self.catalog.snapshot()
-        bind = self.settings.dns_bind
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((bind, self.settings.dns_port or 0))
+        sock.bind((DNS_BIND, DNS_PORT))
         self.port = sock.getsockname()[1]
-        self.settings.dns_port = self.port
         sock.settimeout(0.5)
         self._sock = sock
-        threading.Thread(target=self._loop, name="dns-udp", daemon=True).start()
-        log("info", "DNS UDP service started", port=self.port, bind=bind)
+        threading.Thread(target=self._loop, name="dns-udp",
+                         daemon=True).start()
+        log("info", "DNS UDP service started", port=self.port, bind=DNS_BIND)
         return self.port
 
     def stop(self) -> None:
@@ -88,7 +90,9 @@ class UdpService:
             return
         current = self.catalog.snapshot()
         if current != self._snapshot:
-            send_plan(self.notifier, plan_notifies(self.settings, self._snapshot, self.catalog))
+            send_plan(
+                self.notifier,
+                plan_notifies(self.settings, self._snapshot, self.catalog))
             self._snapshot = current
 
     def _handle(self, data: bytes) -> bytes | None:
@@ -122,10 +126,13 @@ class UdpService:
         member = self.catalog.zones.get(text)
         if member is None or not member.soa:
             return None
-        return dns.rrset.from_text(text, int(member.ttl) or 300, "IN", "SOA", member.soa)
+        return dns.rrset.from_text(text,
+                                   int(member.ttl) or 300, "IN", "SOA",
+                                   member.soa)
 
 
 class _NullStore:
+
     def incr(self, _name: str, _amount: int = 1) -> None:
         return None
 

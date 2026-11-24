@@ -25,7 +25,10 @@ def render(
     upstream: str = "127.0.0.1:8000",
     internal_port: int = 8081,
 ) -> str:
-    real_ip = ["        real_ip_header X-Forwarded-For;", "        real_ip_recursive on;"]
+    real_ip = [
+        "        real_ip_header X-Forwarded-For;",
+        "        real_ip_recursive on;"
+    ]
     for proxy in trusted_proxies:
         real_ip.append(f"        set_real_ip_from {proxy};")
     real_ip_block = "\n".join(real_ip)
@@ -79,6 +82,17 @@ http {{
 
         location = /health {{
             proxy_pass http://{upstream}/ext/health;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            proxy_set_header Connection "";
+            proxy_read_timeout 60s;
+        }}
+
+        location = /config {{
+            proxy_pass http://{upstream}/ext/config;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -143,8 +157,7 @@ def main() -> None:
             list(settings.trusted_proxies),
             upstream=settings.gunicorn_bind,
             internal_port=settings.internal_http_port,
-        )
-    )
+        ))
 
 
 if __name__ == "__main__":
