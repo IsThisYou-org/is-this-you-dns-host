@@ -1,0 +1,8 @@
+#! /bin/sh
+
+docker run -it \
+	-m 1g \
+	--read-only \
+	-v /opt/data/is-this-you-dns-host:/opt/data/ \
+	-p 127.0.0.8:53:53/udp -p 127.0.0.8:53:53 -p 127.0.0.8:80:80 \
+	is-this-you-dns-host $*
