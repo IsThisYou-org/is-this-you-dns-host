@@ -3,6 +3,11 @@
 # service_ns is set. The image copies this example into place on first boot
 # when the file is absent. TSIG secrets may be inline or in tsig_secret_file.
 # They are never read from a zone upload.
+#
+# Minimum log severity for the application and for gunicorn. Syslog names:
+# debug, info, notice, warning, err, crit, alert, emerg. warn and error are
+# accepted. Matching is case-insensitive. Production typically uses warning.
+# log_level: info
 
 service_ns:
   - ns1.example.net.

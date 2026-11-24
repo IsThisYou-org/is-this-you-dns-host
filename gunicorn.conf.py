@@ -5,14 +5,28 @@ path is ``$XDG_RUNTIME_DIR/gunicorn.ctl`` or ``$HOME/.gunicorn/gunicorn.ctl``.
 ``/run`` is a symlink to ``/dev/shm``, so the socket stays on that tmpfs
 when the root filesystem is read-only. The setting name is ``control_socket``
 (command line ``--control-socket``), added in gunicorn 25.1.
+
+``log_level`` in ``/opt/data/etc/config.yaml`` sets the level of the
+gunicorn error logger, the access logger, and the root logger. ``notice``
+is INFO, ``err`` is ERROR, and ``crit``, ``alert`` and ``emerg`` are
+CRITICAL.
 """
 
+from dns_host.config import Settings
+from dns_host.logutil import python_level_name
+
 control_socket = "/run/gunicorn.ctl"
+
+_level = python_level_name(Settings.load().log_level)
 
 logconfig_dict = {
     "version": 1,
     "disable_existing_loggers": False,
-    "formatters": {"msg": {"format": "dns-api: %(message)s"}},
+    "formatters": {
+        "msg": {
+            "format": "dns-api: %(message)s"
+        }
+    },
     "handlers": {
         "syslog": {
             "class": "logging.handlers.SysLogHandler",
@@ -21,10 +35,21 @@ logconfig_dict = {
         }
     },
     "loggers": {
-        "gunicorn.error": {"level": "INFO", "handlers": ["syslog"], "propagate": False},
-        "gunicorn.access": {"level": "INFO", "handlers": ["syslog"], "propagate": False},
+        "gunicorn.error": {
+            "level": _level,
+            "handlers": ["syslog"],
+            "propagate": False,
+        },
+        "gunicorn.access": {
+            "level": _level,
+            "handlers": ["syslog"],
+            "propagate": False,
+        },
     },
-    "root": {"level": "INFO", "handlers": ["syslog"]},
+    "root": {
+        "level": _level,
+        "handlers": ["syslog"]
+    },
 }
 accesslog = None
 errorlog = None
