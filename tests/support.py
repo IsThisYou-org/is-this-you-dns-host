@@ -176,6 +176,55 @@ class Lab:
             response.authority = items
         self.responses[_key(name, rdtype, server)] = response
 
+    def answer_delegation(self, child, parent_servers):
+        """Canned parent NS answers for the direct delegation query.
+
+        A per-server answer wins. Otherwise the server-less fixture (the
+        referral the resolver would have returned with ``rd=1``) is used.
+        Status other than NOERROR or NXDOMAIN is not a delegation. No canned
+        response means that parent nameserver was not reached.
+        """
+
+        from dns_host.chain import _extract
+        from dns_host.parent_ns import delegation_lookup_error
+
+        name = child if isinstance(child, dns.name.Name) else _abs(str(child))
+        transport_errors = []
+        rcode_errors = []
+        definitive = None
+        for server in parent_servers or []:
+            server_text = server.to_text() if isinstance(
+                server, dns.name.Name) else str(server)
+            self.calls.append({
+                "name": name.to_text(),
+                "type": "NS",
+                "server": server_text,
+                "rd": 0,
+                "do": 0,
+                "cd": None,
+                "direct": True,
+            })
+            found = self.responses.get(_key(name, "NS", server_text))
+            if found is None:
+                found = self.responses.get(_key(name, "NS", None))
+            if found is None:
+                transport_errors.append(f"{server_text}: no response")
+                continue
+            if int(found.status) not in (0, 3):
+                rcode_errors.append(f"{server_text}: status {found.status}")
+                continue
+            rrset, _sigs = _extract(found, name, "NS")
+            if rrset is not None:
+                return rrset, found
+            if definitive is None:
+                definitive = (None, found)
+        if definitive is not None:
+            return definitive
+        reached = bool(rcode_errors)
+        errors = rcode_errors + transport_errors
+        raise delegation_lookup_error(name, reached, errors
+                                      or ["no parent nameservers"])
+
     def query(self, name, rdtype, *, server=None, rd=0, do=1, cd=None):
         record = {
             "name": name,

@@ -11,10 +11,13 @@ def test_valid_zone_is_admitted_and_catalog_is_notified_first(env):
     assert "nextExpireHint" in body
     assert env.notifier.zones == ["catalog.svc.test.", "user.example."]
     assert env.lab.calls, "parent lookup should run for a valid zone"
-    assert all(call["do"] == 1 for call in env.lab.calls)
-    assert any(call["rd"] == 0 and call["server"] for call in env.lab.calls)
-    assert any(call["rd"] == 1 and call["server"] is None
-               for call in env.lab.calls)
+    resolver = [call for call in env.lab.calls if not call.get("direct")]
+    direct = [call for call in env.lab.calls if call.get("direct")]
+    assert resolver and direct
+    assert all(call["do"] == 1 for call in resolver)
+    assert any(call["rd"] == 0 and call["server"] for call in resolver)
+    assert any(call["rd"] == 1 and call["server"] is None for call in resolver)
+    assert all(call["rd"] == 0 and call["type"] == "NS" for call in direct)
 
     env.notifier.zones.clear()
     before = len(env.lab.calls)

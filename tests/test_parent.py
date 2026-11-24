@@ -3,6 +3,7 @@
 import json
 
 import dns.name
+import dns.rrset
 import pytest
 
 from dns_host.chain import _query_type, _walk_from_root
@@ -11,6 +12,7 @@ from dns_host.doh import LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.logutil import set_log_level
 from tests.conftest import post
+from tests.support import _key, _rr
 
 
 def test_parent_ds_missing_is_cached(env):
@@ -46,6 +48,78 @@ def test_ns_set_mismatch(env):
     response = post(env, env.lab.zone())
     assert response.status_code == 422, response.get_json()
     assert response.get_json()["error"] == "ns_set_mismatch"
+
+
+def test_delegation_ns_is_not_taken_from_the_resolver(env):
+    response = post(env, env.lab.zone())
+    assert response.status_code == 201, response.get_json()
+    apex = env.lab.apex.to_text()
+    parent = env.lab.parent.to_text()
+    direct = [call for call in env.lab.calls if call.get("direct")]
+    resolver_ns = [
+        call for call in env.lab.calls
+        if call["type"] == "NS" and not call.get("direct")
+    ]
+    assert any(call["name"] == apex for call in direct)
+    assert any(call["name"] == parent for call in direct)
+    assert all(call["name"] != apex for call in resolver_ns)
+    root_ns = [call for call in resolver_ns if call["name"] == "."]
+    below_ns = [call for call in resolver_ns if call["name"] != "."]
+    assert root_ns
+    assert all(call["rd"] == 0 and call["do"] == 1 and call["server"] is None
+               for call in root_ns)
+    assert below_ns
+    assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
+               for call in below_ns)
+
+
+def test_parent_nodata_says_served_no_delegation(env):
+    soa = dns.rrset.from_text(
+        env.lab.parent,
+        300,
+        "IN",
+        "SOA",
+        "ns1.example. hostmaster.example. 1 3600 600 864000 300",
+    )
+    authority = [_rr(soa.name, soa.rdtype, soa.ttl, rdata) for rdata in soa]
+    for server in env.lab.parent_ns:
+        env.lab.responses[_key(env.lab.apex, "NS",
+                               server)] = LookupResponse(status=0,
+                                                         authority=authority)
+    response = post(env, env.lab.zone())
+    assert response.status_code == 403, response.get_json()
+    body = response.get_json()
+    assert body["error"] == "parent_chain_invalid"
+    assert body["message"] == "parent served no delegation for user.example."
+    assert "parent returned no delegation" not in body["message"]
+
+
+def test_missing_parent_response_is_unreachable(env):
+    env.lab.responses.pop(_key(env.lab.apex, "NS", None), None)
+    for server in env.lab.parent_ns:
+        env.lab.responses.pop(_key(env.lab.apex, "NS", server), None)
+    response = post(env, env.lab.zone())
+    assert response.status_code == 503, response.get_json()
+    body = response.get_json()
+    assert body["error"] == "parent_lookup_unavailable"
+    assert "parent nameservers unreachable for user.example." in body[
+        "message"]
+    assert "served no delegation" not in body["message"]
+    assert "parent returned no delegation" not in body["message"]
+
+
+def test_parent_status_servfail_is_not_a_missing_delegation(env):
+    for server in env.lab.parent_ns:
+        env.lab.responses[_key(env.lab.apex, "NS",
+                               server)] = LookupResponse(status=2)
+    response = post(env, env.lab.zone())
+    assert response.status_code == 503, response.get_json()
+    body = response.get_json()
+    assert body["error"] == "parent_lookup_unavailable"
+    assert "did not answer the delegation query" in body["message"]
+    assert "status 2" in body["message"]
+    assert "served no delegation" not in body["message"]
+    assert "parent returned no delegation" not in body["message"]
 
 
 def test_bad_signature_runs_after_parent_and_ds(env):
@@ -133,14 +207,19 @@ def test_tld_dnskey_query_uses_rd1_without_server(env):
     assert all(call["rd"] == 0 and call["server"] == "a.root-servers.net."
                for call in tld_ds)
     below = [
-        call for call in env.lab.calls
-        if call["name"] not in {".", "example."} or (
-            call["name"] == "example." and call["type"] != "DS")
+        call for call in env.lab.calls if not call.get("direct") and (
+            call["name"] not in {".", "example."} or
+            (call["name"] == "example." and call["type"] != "DS"))
     ]
     assert below
     assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
                for call in below)
-    assert all(call["cd"] == env.settings.doh_cd for call in env.lab.calls)
+    direct = [call for call in env.lab.calls if call.get("direct")]
+    assert any(call["name"] == "user.example." and call["type"] == "NS"
+               for call in direct)
+    assert all(call["rd"] == 0 and call["type"] == "NS" for call in direct)
+    resolver = [call for call in env.lab.calls if not call.get("direct")]
+    assert all(call["cd"] == env.settings.doh_cd for call in resolver)
 
 
 def test_handshake_root_data_uses_rd0_at_the_handshake_server(env):
@@ -170,11 +249,17 @@ def test_handshake_root_data_uses_rd0_at_the_handshake_server(env):
     assert root_zone
     assert all(call["rd"] == 0 and call["do"] == 1 and call["server"] == server
                for call in root_zone)
-    other = [call for call in env.lab.calls if call not in root_zone]
+    other = [
+        call for call in env.lab.calls
+        if call not in root_zone and not call.get("direct")
+    ]
     assert any(call["type"] == "DNSKEY" and call["name"] == "example."
                for call in other)
     assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
                for call in other)
+    direct = [call for call in env.lab.calls if call.get("direct")]
+    assert direct
+    assert all(call["type"] == "NS" and call["rd"] == 0 for call in direct)
 
 
 def test_lookup_error_text_is_logged_and_returned(env, capsys):
