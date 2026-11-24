@@ -137,8 +137,13 @@ def test_provide_xfr_and_notify_come_from_one_secondary_list():
     assert "request-xfr: AXFR 127.0.0.1@5353 NOKEY" in text
     assert "catalog: consumer" in text
     assert 'catalog-member-pattern: "catalog-member"' in text
-    assert text.count("\nzone:") == 1
-    assert "user.example" not in text
+    assert text.count("\nzone:") == 2
+    assert 'name: "user.example"' in text
+    assert 'zonefile: "c6/3c/user.example.axfr"' in text
+    assert 'zonefile: "86/3d/catalog.example.net.axfr"' in text
+    assert "zonefiles-write: 60" in text
+    assert "%1" not in text
+    assert '%s' not in text
     provide = [
         line.split("provide-xfr:", 1)[1].strip() for line in text.splitlines()
         if line.strip().startswith("provide-xfr:")

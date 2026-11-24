@@ -21,14 +21,19 @@ from dns_host.catalogfile import Catalog, Member
 from dns_host.config import data_dir
 from dns_host.logutil import log
 from dns_host.notifyplan import plan_notifies, send_plan
+from dns_host.shard import remove_zone_file, zone_file_name, zone_path
 from dns_host.spool import decode_job, pending
 from dns_host.wireaxfr import catalog_tcp_bytes
 
 
 def zone_wire_path(settings, apex: str) -> Path:
-    safe = apex.strip().lower().rstrip(".").replace("/", "_")
     del settings
-    return data_dir() / "zones" / f"{safe}.axfr"
+    return zone_path(data_dir() / "zones", apex, zone_file_name(apex, ".axfr"))
+
+
+def discard_zone_wire(settings, apex: str) -> None:
+    del settings
+    remove_zone_file(data_dir() / "zones", apex, zone_file_name(apex, ".axfr"))
 
 
 class Controller:
@@ -39,6 +44,7 @@ class Controller:
         self.notifier = notifier
         self.catalog = Catalog(settings)
         self._spool_mtime = None
+        self._nsd_members: tuple | None = None
 
     @property
     def spool_dir(self) -> Path:
@@ -74,6 +80,9 @@ class Controller:
             changed = True
         if not changed:
             return []
+        # Publish explicit zonefile paths before the catalog file changes,
+        # so a reload lands before NOTIFY makes NSD read the new catalog.
+        self._sync_nsd()
         self.catalog.save(self.settings.now())
         self._write_catalog_wire()
         messages = plan_notifies(self.settings, before, self.catalog)
@@ -85,10 +94,11 @@ class Controller:
         had = apex in self.catalog.zones
         self.catalog.zones.pop(apex, None)
         sql_serial = self.store.delete_zone(apex, now)
-        zone_wire_path(self.settings, apex).unlink(missing_ok=True)
+        discard_zone_wire(self.settings, apex)
         if not had and sql_serial is None:
             return None
         if had:
+            self._sync_nsd()
             self.catalog.save(now)
             self._write_catalog_wire()
         return self.catalog.serial
@@ -165,13 +175,29 @@ class Controller:
             return False
         for apex in removed:
             self.catalog.zones.pop(apex, None)
-            zone_wire_path(self.settings, apex).unlink(missing_ok=True)
+            discard_zone_wire(self.settings, apex)
             self.store.delete_zone(apex, now)
             log("info",
                 "zone aged out",
                 apex=apex,
                 reason="rrsig grace elapsed")
         return True
+
+    def _sync_nsd(self) -> None:
+        from dns_host.nsdconf import reload_nsd, write_nsd_config
+        from dns_host.shard import canonical_zone
+
+        names = tuple(
+            sorted(
+                canonical_zone(apex) for apex in self.catalog.member_names()))
+        if names == self._nsd_members:
+            return
+        write_nsd_config(
+            self.settings,
+            [self.settings.catalog_zone.to_text(), *names],
+        )
+        reload_nsd()
+        self._nsd_members = names
 
     def _write_catalog_wire(self) -> None:
         blob = catalog_tcp_bytes(self.settings, self.catalog.serial,
@@ -238,6 +264,9 @@ def main() -> None:
     settings = Settings.load()
     settings.require_service_ns()
     log_effective(settings)
+    from dns_host.shard import migrate_flat_zone_files
+
+    migrate_flat_zone_files(data_dir() / "zones")
     store = Store(settings.db_path)
     store.ensure_catalog(settings.now())
     Controller(settings, store).serve_forever()

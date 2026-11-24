@@ -382,22 +382,25 @@ class Store:
         write_catalogue(directory, self.catalog_serial(), self._catalogue_members())
 
     def unpublish_member(self, apex: str) -> None:
+        from dns_host.shard import remove_zone_file
         from dns_host.zonesync import write_catalogue, zone_filename
 
         directory = self.zones_directory()
         write_catalogue(directory, self.catalog_serial(), self._catalogue_members())
-        (directory / zone_filename(apex)).unlink(missing_ok=True)
+        remove_zone_file(directory, apex, zone_filename(apex))
 
     def republish_all(self) -> None:
+        from dns_host.shard import iter_zone_files, migrate_flat_zone_files
         from dns_host.zonesync import write_catalogue, write_member, zone_filename
 
         directory = self.zones_directory()
+        migrate_flat_zone_files(directory)
         directory.mkdir(parents=True, exist_ok=True)
         keep: set[str] = set()
         for row in self.list_zones():
             write_member(directory, row.apex, row.document)
             keep.add(zone_filename(row.apex))
-        for path in directory.glob("*.json"):
+        for path in iter_zone_files(directory, ".json"):
             if path.name == "catalogue.json" or path.name in keep:
                 continue
             path.unlink()

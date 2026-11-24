@@ -9,6 +9,8 @@ JSON is not an input.
 from __future__ import annotations
 
 import os
+import pwd
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,7 +23,12 @@ from dns_host.config import (
     NSD_PORT,
     data_dir,
 )
+from dns_host.shard import canonical_zone, relative_zonefile
 from dns_host.zonesync import atomic_write
+
+# How often NSD writes a changed secondary zone to its zonefile. The file is
+# what NSD reads after a restart; the next SOA check decides whether to AXFR.
+ZONEFILES_WRITE_SECONDS = 60
 
 
 def nsd_conf_path(settings) -> Path:
@@ -57,6 +64,7 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
         "    verbosity: 2",
         "    log-only-syslog: yes",
         f'    zonesdir: "{data_dir() / "nsd" / "zones"}"',
+        f"    zonefiles-write: {ZONEFILES_WRITE_SECONDS}",
         f'    xfrdir: "{data_dir() / "nsd" / "xfr"}"',
         f'    cookie-secret-file: "{data_dir() / "nsd" / "cookiesecrets.txt"}"',
         '    pidfile: "/run/nsd/nsd.pid"',
@@ -89,10 +97,11 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
             f'    secret: "{secret}"',
             "",
         ])
-    # One catalog zone. NSD creates member zones from it; nothing here is
-    # rewritten when a user zone is added, and NSD is not reloaded.
     # AXFR (not IXFR) from the fixed internal listener. That transfer is
-    # always allowed.
+    # always allowed. NSD zonefile patterns expand %s, %1, %2, %3, %z, %y,
+    # and %x (characters and labels). None of those is the FNV shard, so
+    # each zone gets an explicit zonefile path. The member pattern itself
+    # has no zonefile; the zone blocks below name the file.
     master = "AXFR " + _endpoint(DNS_BIND, DNS_PORT)
     lines.extend([
         "pattern:",
@@ -101,11 +110,12 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
         f"    allow-notify: {DNS_BIND} NOKEY",
     ])
     _transfer_acl(lines, settings)
-    catalog_name = settings.catalog_zone.to_text().rstrip(".")
+    catalog_name = canonical_zone(settings.catalog_zone.to_text())
     lines.extend([
         "",
         "zone:",
         f'    name: "{catalog_name}"',
+        f'    zonefile: "{relative_zonefile(catalog_name)}"',
         f"    request-xfr: {master} NOKEY",
         f"    allow-notify: {DNS_BIND} NOKEY",
         "    catalog: consumer",
@@ -113,8 +123,14 @@ def render_nsd(settings, zone_names: list[str] | None = None) -> str:
     ])
     _transfer_acl(lines, settings)
     lines.append("")
-    # zone_names is intentionally unused: members come from the catalog zone.
-    del zone_names
+    for name in _member_names(catalog_name, zone_names):
+        lines.extend([
+            "zone:",
+            f'    name: "{name}"',
+            '    include-pattern: "catalog-member"',
+            f'    zonefile: "{relative_zonefile(name)}"',
+            "",
+        ])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -131,12 +147,109 @@ def _transfer_acl(lines: list[str], settings) -> None:
         lines.append(f"    provide-xfr: {network} NOKEY")
 
 
+def _member_names(catalog_name: str,
+                  zone_names: list[str] | None) -> list[str]:
+    seen = {catalog_name}
+    members: list[str] = []
+    for name in zone_names or []:
+        try:
+            canon = canonical_zone(name)
+            if not canon or canon in seen:
+                continue
+            # Reject a name that cannot be a zonefile basename.
+            relative_zonefile(canon)
+        except ValueError:
+            continue
+        seen.add(canon)
+        members.append(canon)
+    return sorted(members)
+
+
+def nsd_zones_dir() -> Path:
+    return data_dir() / "nsd" / "zones"
+
+
+def ensure_nsd_zone_dirs(names: list[str]) -> None:
+    """Create ``hh/ll`` under the NSD zonesdir and give them to the nsd user.
+
+    NSD writes the zonefile at the configured relative path. Those parent
+    directories have to exist first, and the nsd user has to be able to
+    create the file after it drops privileges.
+    """
+
+    root = nsd_zones_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    _chown_nsd(root)
+    seen: set[Path] = set()
+    for name in names:
+        try:
+            relative = relative_zonefile(name)
+        except ValueError:
+            continue
+        directory = (root / relative).parent
+        if directory in seen:
+            continue
+        seen.add(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        _chown_nsd(directory.parent)
+        _chown_nsd(directory)
+
+
+def _chown_nsd(path: Path) -> None:
+    try:
+        account = pwd.getpwnam("nsd")
+    except KeyError:
+        return
+    try:
+        os.chown(path, account.pw_uid, account.pw_gid)
+    except OSError:
+        return
+
+
 def write_nsd_config(settings, zone_names: list[str] | None = None) -> Path:
-    """Write the static NSD config. Members are not listed and NSD is not reloaded."""
+    """Write nsd.conf, including an explicit zonefile path for each member."""
 
     path = nsd_conf_path(settings)
     atomic_write(path, render_nsd(settings, zone_names))
+    names = [settings.catalog_zone.to_text()]
+    if zone_names:
+        names.extend(zone_names)
+    ensure_nsd_zone_dirs(names)
     return path
+
+
+def reload_nsd() -> bool:
+    """Ask a running NSD to reread nsd.conf. Missing control socket is fine."""
+
+    binary = shutil.which("nsd-control")
+    conf = data_dir() / "nsd" / "nsd.conf"
+    if binary is None or not conf.is_file():
+        return False
+    try:
+        result = subprocess.run(
+            [binary, "-c", str(conf), "reload"],
+            check=False,
+            timeout=5,
+            capture_output=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log_reload(str(exc))
+        return False
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout
+                  or b"").decode("utf-8", "replace").strip()
+        log_reload(detail or f"exit {result.returncode}")
+        return False
+    from dns_host.logutil import log
+
+    log("info", "nsd reloaded")
+    return True
+
+
+def log_reload(error: str) -> None:
+    from dns_host.logutil import log
+
+    log("info", "nsd reload did not apply", error=error)
 
 
 def ensure_control_keys(directory: Path) -> None:

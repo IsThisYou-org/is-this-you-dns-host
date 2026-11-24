@@ -12,8 +12,10 @@ import os
 import pwd
 from pathlib import Path
 
+from dns_host.catalogfile import Catalog
 from dns_host.config import Settings, log_effective
 from dns_host.nsdconf import ensure_control_keys, nsd_conf_path, write_nsd_config
+from dns_host.shard import migrate_flat_zone_files
 
 
 def _chown_tree(directory: Path, user: str) -> None:
@@ -31,12 +33,18 @@ def main() -> None:
     path = nsd_conf_path(settings)
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "zones").mkdir(parents=True, exist_ok=True)
-    (directory / "xfr").mkdir(parents=True, exist_ok=True)
+    zones = directory / "zones"
+    xfr = directory / "xfr"
+    zones.mkdir(parents=True, exist_ok=True)
+    xfr.mkdir(parents=True, exist_ok=True)
+    migrate_flat_zone_files(zones, bare_as_axfr=True)
+    migrate_flat_zone_files(xfr)
     runtime = Path("/run/nsd")
     runtime.mkdir(parents=True, exist_ok=True)
-    # Static config: only the catalog zone. Never rewritten when members change.
-    write_nsd_config(settings, [settings.catalog_zone.to_text()])
+    catalog = Catalog(settings)
+    catalog.load()
+    write_nsd_config(
+        settings, [settings.catalog_zone.to_text(), *catalog.member_names()])
     ensure_control_keys(directory)
     _chown_tree(directory, "nsd")
     _chown_tree(runtime, "nsd")
