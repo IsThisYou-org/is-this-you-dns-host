@@ -73,7 +73,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 | --- | --- | --- |
 | `service_ns` | unset; the process refuses to start | Public nameservers. All of them must appear in the apex NS and in the parent delegation. |
 | `secondaries` | empty | IP, optional port, optional TSIG. NSD `provide-xfr` and `notify` are generated from this list. |
-| `resolver_base_url` | `https://api.isthisyou.org/` | DoH JSON resolver for parent lookups. |
+| `resolver_base_url` | `https://api.isthisyou.org/` | Base URL of a JSON DoH API (`Accept: application/dns-json`). Not a binary DoH endpoint (`application/dns-message`). |
 | `catalog_zone` | `catalog.example.net.` | Catalog zone apex (RFC 9432). |
 | `trusted_proxies` | empty | CIDRs allowed to supply `X-Forwarded-For` / `X-Forwarded-Proto` on the external listener. |
 | `grace_days` | `90` | How long to keep serving after RRSIG expiry or parent DS/NS drift. |
@@ -110,7 +110,7 @@ curl -sS -X POST "http://127.0.0.1/api/v1/zones/user.example" \
 
 A success body is `{"apex", "serial", "catalogUpdated", "nextExpireHint"}`. `nextExpireHint` is the earliest RRSIG expiration. The first accept is HTTP 201; a later higher serial is HTTP 200.
 
-The sample zone will not pass against the public resolver unless `user.example` is really delegated to this host. Point `resolver_base_url` at your own copy of the same DoH JSON API, or run the test suite, which signs a zone and answers the parent walk itself.
+The sample zone will not pass against the public resolver unless `user.example` is really delegated to this host. Point `resolver_base_url` at your own copy of the same JSON DoH API (`application/dns-json`, not a binary `application/dns-message` endpoint), or run the test suite, which signs a zone and answers the parent walk itself.
 
 ### Upload body
 
@@ -140,7 +140,7 @@ User zones are NSEC3 as in RFC 9276: iterations 0, empty salt, Opt-Out off. Plai
 
 Body size, then the per-IP upload rate, then JSON. After that, still offline: RRset, name, and rdata caps, owner names, one apex SOA, serial freshness, type policy, TTL bounds, DNSKEY, RRSIG metadata, the NSEC3 chain, apex NS contains every `service_ns`, and in-bailiwick NS names have A or AAAA glue. Glue is checked before any parent query because it does not need the parent.
 
-Only then does the service spend a parent-lookup token. Failed parent results are cached per apex for `negative_cache_ttl_seconds` and a retry in that window does not query again. The walk uses the DoH JSON resolver and only these parameters: `name`, `type`, `do=1`, `rd=0`, `server=<parent NS>`, `cd`. `do=1` answers are read from base64 `rdata`. The resolver's AD bit is not trusted.
+Only then does the service spend a parent-lookup token. Failed parent results are cached per apex for `negative_cache_ttl_seconds` and a retry in that window does not query again. The walk uses the JSON DoH API (`application/dns-json`) and only these parameters: `name`, `type`, `do=1`, `rd`, `cd`, and `server` on `rd=0` queries. `rd=0` is only for data in the root zone: the root DNSKEY, the root NS, and the DS of a TLD (one label below the root). The ICANN root DNSKEY and NS are read from the resolver's local copy (`rd=0`, no `server`); the TLD DS is read with `rd=0` at the root nameservers. The Handshake fallback follows the same rule, sending `rd=0` for Handshake-root data to `handshake_root_servers`. TLD and lower DNSKEY, DS below the TLD, and NS below the root use `rd=1` and `do=1` and do not send `server`. `do=1` answers are read from base64 `rdata`. Every RRset signature is validated locally. The resolver's AD bit is not trusted. `cd` follows `doh_cd`.
 
 The parent NS name set must equal the apex NS set. If the parent is missing a service NS the error is `parent_ns_incomplete` (403). Any other difference is `ns_set_mismatch` (422). The DS digest is compared to the uploaded KSK before any signature in the upload is verified. Signature verification is last.
 
