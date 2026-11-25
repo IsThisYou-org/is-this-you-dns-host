@@ -10,9 +10,10 @@ import dns.rcode
 import dns.rdatatype
 
 from dns_host.axfr_service import supervise_once
-from dns_host.catalogfile import Catalog, next_catalog_serial
+from dns_host.catalogfile import Catalog, Member, next_catalog_serial
 from dns_host.controller import Controller
 from dns_host.dns_server import DnsServer
+from dns_host.notify import RecordingNotifier
 from dns_host.dnskey_cache import get_process_cache
 from dns_host.spool import pending, submit
 from tests.conftest import post
@@ -31,6 +32,89 @@ def test_catalog_serial_is_max_of_now_and_last_plus_one_and_is_the_mtime(
     catalog.save(9000)
     assert catalog.serial == 9000
     assert int(catalog.path.stat().st_mtime) == 9000
+
+
+def test_catalog_save_without_bump_keeps_serial_and_rewrites_the_file(
+        tmp_path, monkeypatch):
+    settings = _settings(tmp_path, now=100, monkeypatch=monkeypatch)
+    catalog = Catalog(settings)
+    catalog.serial = 5000
+    catalog.save(100)
+    assert catalog.serial == 5001
+    bumped_mtime = catalog.path.stat().st_mtime_ns
+    catalog.zones["a.example."] = _member("a.example.", 2)
+    catalog.save(9000, bump=False)
+    assert catalog.serial == 5001
+    assert catalog.mtime_ns != bumped_mtime
+    reader = Catalog(settings)
+    reader.load()
+    assert reader.serial == 5001
+    assert reader.serial_of("a.example.") == 2
+    assert reader.mtime_ns == catalog.mtime_ns
+    # The rewrite must change mtime so watchers reload, without bumping serial.
+    assert int(catalog.path.stat().st_mtime) != 5001
+
+
+def test_existing_member_update_does_not_bump_or_notify_the_catalog(
+        tmp_path, monkeypatch):
+    clock = {"t": 1_700_000_000}
+    settings = _settings(tmp_path,
+                         now=clock["t"],
+                         monkeypatch=monkeypatch,
+                         clock=clock)
+    store = _store(settings)
+    notifier = RecordingNotifier()
+    controller = Controller(settings, store, notifier=notifier)
+    spool = Path(settings.db_path).parent / "spool"
+    spool.mkdir(parents=True)
+    far = clock["t"] + 365 * 86400
+    submit(spool, _job(apex="user.example.", serial=10, expires_at=far))
+    controller.run_once()
+    catalog = Catalog(settings)
+    catalog.load()
+    first_serial = catalog.serial
+    first_wire = catalog.wire_path.read_bytes()
+    assert catalog.serial_of("user.example.") == 10
+    assert notifier.zones == [settings.catalog_zone.to_text(), "user.example."]
+    notifier.zones.clear()
+    clock["t"] += 10
+    submit(spool, _job(apex="user.example.", serial=11, expires_at=far))
+    notified = controller.run_once()
+    catalog.load()
+    assert catalog.serial == first_serial
+    assert catalog.serial_of("user.example.") == 11
+    assert catalog.wire_path.read_bytes() == first_wire
+    assert notifier.zones == ["user.example."]
+    assert notified == ["user.example."]
+
+
+def test_member_add_and_age_out_bump_and_notify_the_catalog(
+        tmp_path, monkeypatch):
+    clock = {"t": 1_700_000_000}
+    settings = _settings(tmp_path,
+                         now=clock["t"],
+                         monkeypatch=monkeypatch,
+                         clock=clock)
+    store = _store(settings)
+    notifier = RecordingNotifier()
+    controller = Controller(settings, store, notifier=notifier)
+    spool = Path(settings.db_path).parent / "spool"
+    spool.mkdir(parents=True)
+    expires_at = clock["t"] + 10
+    submit(spool, _job(apex="user.example.", serial=10, expires_at=expires_at))
+    controller.run_once()
+    catalog = Catalog(settings)
+    catalog.load()
+    first_serial = catalog.serial
+    assert notifier.zones == [settings.catalog_zone.to_text(), "user.example."]
+    notifier.zones.clear()
+    clock["t"] = expires_at + settings.grace_seconds + 5
+    notified = controller.run_once()
+    catalog.load()
+    assert catalog.serial == next_catalog_serial(first_serial, clock["t"])
+    assert catalog.zones == {}
+    assert notifier.zones == [settings.catalog_zone.to_text()]
+    assert notified == [settings.catalog_zone.to_text()]
 
 
 def test_controller_ignores_empty_dirs_and_hidden_files_and_rechecks_serial(
@@ -118,12 +202,21 @@ def test_dead_axfr_child_is_replaced():
     assert pids == {2, 101}
 
 
-def _settings(tmp_path, now: int, monkeypatch):
+def _member(apex: str, serial: int):
+    return Member(apex=apex,
+                  serial=serial,
+                  soa=f"ns1.example.net. hostmaster.{apex} {serial} 1 1 1 1",
+                  ttl=300,
+                  expires_at=0)
+
+
+def _settings(tmp_path, now: int, monkeypatch, clock=None):
     from dns_host.config import Settings
     from dns_host.names import normalise_name
 
     monkeypatch.setattr("dns_host.config.DATA_DIR", tmp_path)
-    clock = {"t": now}
+    if clock is None:
+        clock = {"t": now}
 
     def now_fn():
         return clock["t"]

@@ -1,8 +1,12 @@
 """Catalog file owned by the zone-master controller.
 
-The file lists member zone names and their full SOA records. Its own SOA
-serial is ``max(now, last + 1)``. That value is also the file mtime, which is
-what the UDP and TCP services read when they answer catalog SOA.
+The file lists member zone names and their full SOA records. The catalog
+SOA serial is stored in the file and is ``max(now, last + 1)`` when catalog
+content changes (a member is added or removed, or another catalog RR
+changes). A member content update rewrites that member's metadata without
+changing the serial. When the serial is bumped, the file mtime is set to
+that serial. The UDP and TCP services use mtime only to notice a rewrite,
+and they answer catalog SOA from the serial stored in the file.
 """
 
 from __future__ import annotations
@@ -86,13 +90,19 @@ class Catalog:
                 parent_zone=item.get("parent_zone") or "",
             )
         self.zones = zones
-        # The served catalog SOA serial is the file mtime. ``save`` sets that
-        # mtime to max(now, last+1), so the two stay equal.
-        self.serial = int(before // 1_000_000_000)
+        # The served catalog SOA serial is the value stored in the file.
+        # mtime is only a change signal: a member update rewrites the file
+        # without bumping the serial, so the two can differ.
+        stored = data.get("serial")
+        if stored is not None:
+            self.serial = int(stored)
+        else:
+            self.serial = int(before // 1_000_000_000)
         self.mtime_ns = before
 
-    def save(self, now: int) -> int:
-        self.serial = next_catalog_serial(self.serial, now)
+    def save(self, now: int, bump: bool = True) -> int:
+        if bump:
+            self.serial = next_catalog_serial(self.serial, now)
         payload = {
             "serial":
             self.serial,
@@ -108,7 +118,9 @@ class Catalog:
         }
         text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         atomic_write(self.path, text)
-        os.utime(self.path, (self.serial, self.serial))
+        if bump:
+            # Keep mtime equal to the new serial, as before.
+            os.utime(self.path, (self.serial, self.serial))
         self.mtime_ns = self.path.stat().st_mtime_ns
         return self.serial
 

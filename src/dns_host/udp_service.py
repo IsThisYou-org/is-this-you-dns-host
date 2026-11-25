@@ -1,9 +1,9 @@
 """DNS UDP process: SOA answers and NOTIFY.
 
 SOA answers for the catalog and for member zones come from the catalog file.
-Zone files are not read. The catalog SOA serial is the catalog file's mtime.
-The file is polled; NOTIFY is sent to the local NSD for the catalog and for
-new or updated members when it changes. At start-up, once the catalog has
+Zone files are not read. The catalog SOA serial is the value stored in the file.
+The file is polled by mtime; NOTIFY is sent to the local NSD for the catalog
+when that serial changes, and for new or updated members. At start-up, once the catalog has
 loaded, the catalog alone is notified, because NSD may hold an old catalog
 from before a restart. The send waits until the AXFR listener accepts a
 connection: NSD transfers immediately, and a refused connection on a zone

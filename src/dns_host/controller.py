@@ -65,8 +65,14 @@ class Controller:
             changed = True
         if not changed:
             return []
-        self.catalog.save(self.settings.now())
-        self._write_catalog_wire()
+        # Member metadata (SOA serial, expiry) lives in catalog.json, but
+        # the catalog zone RRs are only membership PTRs plus the catalog
+        # SOA/NS/version. A content update of an existing member must not
+        # bump the catalog serial or NOTIFY the catalog.
+        bump = _membership_changed(before, self.catalog)
+        self.catalog.save(self.settings.now(), bump=bump)
+        if bump:
+            self._write_catalog_wire()
         messages = plan_notifies(self.settings, before, self.catalog)
         send_plan(self.notifier, messages)
         return [zone for zone, _soa in messages]
@@ -174,6 +180,11 @@ class Controller:
         blob = catalog_tcp_bytes(self.settings, self.catalog.serial,
                                  self.catalog.member_names())
         atomic_write_bytes(self.catalog.wire_path, blob)
+
+
+def _membership_changed(before: tuple, catalog) -> bool:
+    _serial, old_zones = before
+    return {apex for apex, _member_serial in old_zones} != set(catalog.zones)
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
