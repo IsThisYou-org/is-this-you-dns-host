@@ -41,6 +41,8 @@ Admission fails if these are blocked. The port 53 destinations are not a fixed l
 * **Resolver.** HTTPS to `resolver_base_url`. The default is `https://api.isthisyou.org/`. The chain walk is JSON DoH to that URL.
 * **Parent nameservers, port 53.** Outbound UDP port 53, and TCP port 53 only when the UDP answer is truncated, to the addresses of the authoritative servers at each zone cut: the root, the TLD, and on down to the zone that publishes the DS. Those addresses come from glue or from the resolver. Every zone cut asks for the delegation NS this way. When the resolver's DS does not match the uploaded KSKs, the apex DS is read from that parent zone's nameservers over the same ports (RD clear, DO set). Allowing only the DoH host is not enough. If this query is blocked, nothing is added and the mismatch stands.
 
+A stateful firewall (iptables or nftables `ctstate RELATED,ESTABLISHED`) lets those replies back in. A strict inbound policy needs an explicit rule for replies from source port 53, UDP and TCP, to the container.
+
 If `secondaries` is set, NSD sends NOTIFY by UDP to each configured address and port (default 53). If `SYSLOG_SERVER` is set, syslogd forwards there (port 514 when the port is omitted). Neither is required for admission.
 
 busybox `syslogd` listens on the `/dev/log` socket and does not accept incoming network syslog. Application logs go to that socket only. The default is `/opt/data/log/messages`. Set `SYSLOG_STDOUT=Y` to write the container's stdout instead, for testing. Set `SYSLOG_SERVER=<host[:port]>` to forward to a remote syslog server (port 514 when the port is omitted). `SYSLOG_SERVER` is checked first. When either variable is set, the local file is not written.
