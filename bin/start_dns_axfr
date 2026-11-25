@@ -1,3 +1,5 @@
 #!/bin/sh
 set -eu
+# 1006 is the AXFR service's config failure. ps shows "sleep 1006".
+python3 -c 'from dns_host.config import Settings; Settings.load().require_service_ns()' || exec sleep 1006
 exec python3 -m dns_host.axfr_service

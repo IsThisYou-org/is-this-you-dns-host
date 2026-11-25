@@ -1,4 +1,6 @@
 #!/bin/sh
 set -eu
 mkdir -p /opt/data/spool/tmp /opt/data/zones /opt/data/catalog
+# 1004 is the controller's config failure. ps shows "sleep 1004".
+python3 -c 'from dns_host.config import Settings; Settings.load().require_service_ns()' || exec sleep 1004
 exec python3 -m dns_host.controller

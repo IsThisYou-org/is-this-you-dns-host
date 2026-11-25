@@ -1,8 +1,9 @@
 # Operator configuration. Mount this file at /opt/data/etc/config.yaml.
 # A missing file is treated as empty and the process refuses to start until
 # service_ns is set. The image copies this example into place on first boot
-# when the file is absent. TSIG secrets may be inline or in tsig_secret_file.
-# They are never read from a zone upload.
+# when the file is absent. Unknown keys are rejected. Values are checked at
+# startup and every problem is reported, one line per key. TSIG secrets may
+# be inline or in tsig_secret_file. They are never read from a zone upload.
 #
 # Minimum log severity for the application and for gunicorn. Syslog names:
 # debug, info, notice, warning, err, crit, alert, emerg. warn and error are
@@ -68,4 +69,5 @@ parent_query_budget: 15
 parent_query_window_seconds: 60
 ds_digest_types:
   - 2
+# YAML boolean (`true` or `false`). A quoted string or a number is rejected.
 health_check_dns: true
