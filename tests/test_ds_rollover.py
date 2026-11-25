@@ -127,3 +127,82 @@ def test_match_uses_canonical_owner_name():
     matched, unmatched = match_ds_by_algorithm(upper, keys, [ds], (2, ))
     assert matched == [key]
     assert unmatched == []
+
+
+def _direct_ds(lab, *ds_rdatas, signer=None):
+    from tests.support import _pack
+    from dns_host.doh import LookupResponse
+
+    ds = dns.rrset.from_rdata(lab.apex, 300, *ds_rdatas)
+    priv, key = signer or (lab.parent_zsk_priv, lab.parent_zsk)
+    sig = lab._sig(ds, priv, key, lab.parent)
+    lab.direct[(lab.apex.to_text(),
+                "DS")] = LookupResponse(status=0,
+                                        answer=_pack(ds, sig),
+                                        aa=True)
+
+
+def test_stale_resolver_ds_is_rechecked_at_the_parent(env):
+    """The resolver still has the DS set from before the new DS was added."""
+
+    lab = env.lab
+    _priv, removed = generate_key(257)
+    _publish_ds(lab, _ds(lab, removed))
+    _direct_ds(lab, _ds(lab, removed), _ds(lab, lab.child_ksk))
+    response = post(env, lab.zone(serial=lab.now))
+    assert response.status_code == 201, response.get_json()
+    direct_ds = [
+        call for call in lab.calls
+        if call.get("direct") and call["type"] == "DS"
+    ]
+    assert {call["server"]
+            for call in direct_ds
+            } == {name.to_text()
+                  for name in lab.parent_ns}
+
+
+def test_direct_ds_with_a_bad_signature_is_ignored(env):
+    lab = env.lab
+    _priv, removed = generate_key(257)
+    _publish_ds(lab, _ds(lab, removed))
+    _direct_ds(lab,
+               _ds(lab, removed),
+               _ds(lab, lab.child_ksk),
+               signer=generate_key(256))
+    response = post(env, lab.zone(serial=lab.now))
+    assert response.status_code == 403, response.get_json()
+    body = response.get_json()
+    assert body["error"] == "parent_ds_mismatch"
+    assert f"{_tag(removed)} (alg 13, digest 2)" in body["message"]
+
+
+def test_matching_resolver_ds_does_not_ask_the_parent(env):
+    lab = env.lab
+    response = post(env, lab.zone(serial=lab.now))
+    assert response.status_code == 201, response.get_json()
+    assert not [
+        call
+        for call in lab.calls if call.get("direct") and call["type"] == "DS"
+    ]
+
+
+def test_dnskey_signed_only_by_removed_ksk_is_a_signature_error(env):
+    """Not parent_ds_mismatch: the offline RRSIG check rejects it first."""
+
+    from dns_host.zonesign import sign_rrset
+
+    lab = env.lab
+    old_priv, old = generate_key(257)
+    _publish_ds(lab, _ds(lab, old), _ds(lab, lab.child_ksk))
+    body = lab.zone(serial=lab.now)
+    dnskey = dns.rrset.from_rdata(lab.apex, 300, lab.child_ksk, lab.child_zsk)
+    sig = sign_rrset(dnskey, old_priv, old, lab.apex, lab.inception,
+                     lab.expiration)
+    for item in body["rrsets"]:
+        if item["type"] == "RRSIG" and item["rrdatas"][0].startswith(
+                "DNSKEY "):
+            item["rrdatas"] = [sig.to_text()]
+    response = post(env, body)
+    assert response.status_code == 422, response.get_json()
+    assert response.get_json()["error"] == "rrsig_key_mismatch"
+    assert str(_tag(old)) in response.get_json()["message"]

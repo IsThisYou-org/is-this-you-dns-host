@@ -73,6 +73,8 @@ class Lab:
         self.root_ds = dns.dnssec.make_ds(self.root, self.root_ksk, "SHA256")
         self.calls: list[dict] = []
         self.responses: dict[tuple[str, str, str], LookupResponse] = {}
+        # Answers from a parent nameserver asked directly with rd=0.
+        self.direct: dict[tuple[str, str], LookupResponse] = {}
         self.publish()
 
     def publish(self, *, ds="match", ns="match") -> None:
@@ -224,6 +226,18 @@ class Lab:
         errors = rcode_errors + transport_errors
         raise delegation_lookup_error(name, reached, errors
                                       or ["no parent nameservers"])
+
+    def answer_direct(self, name, rdtype, server):
+        self.calls.append({
+            "name": name.to_text(),
+            "type": rdtype,
+            "server": server,
+            "rd": 0,
+            "do": 1,
+            "cd": None,
+            "direct": True,
+        })
+        return self.direct.get((name.to_text(), rdtype))
 
     def query(self, name, rdtype, *, server=None, rd=0, do=1, cd=None):
         record = {

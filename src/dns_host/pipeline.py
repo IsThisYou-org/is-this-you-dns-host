@@ -14,9 +14,15 @@ import dns.name
 import dns.rdatatype
 import dns.rrset
 
-from dns_host.chain import Delegation, authenticate_parent, match_ds_by_algorithm
+from dns_host.chain import (
+    Delegation,
+    authenticate_parent,
+    direct_parent_ds,
+    match_ds_by_algorithm,
+)
 from dns_host.denial import check_nsec3
 from dns_host.errors import ApiError
+from dns_host.logutil import log
 from dns_host.rrtypes import WALLET_TYPE, admission_block_reason, type_name
 from dns_host.zone import ParsedZone
 
@@ -307,11 +313,29 @@ def parent_checks(zone: ParsedZone, settings, lookup) -> Delegation:
     return delegation
 
 
-def ds_matches(zone: ParsedZone, delegation: Delegation, settings) -> list:
+def ds_matches(zone: ParsedZone,
+               delegation: Delegation,
+               settings,
+               lookup=None) -> list:
     ds_records = list(delegation.ds_rrset)
     matched, unmatched = match_ds_by_algorithm(zone.apex, zone.get(DNSKEY),
                                                ds_records,
                                                settings.ds_digest_types)
+    if (not matched or unmatched) and lookup is not None:
+        # The resolver can hold the DS RRset from before the parent last
+        # changed it. Ask the parent's own nameservers before rejecting.
+        direct = direct_parent_ds(lookup, settings, zone.apex, delegation)
+        fresh = ds_records + [ds for ds in direct if ds not in ds_records]
+        if len(fresh) > len(ds_records):
+            ds_records = fresh
+            matched, unmatched = match_ds_by_algorithm(
+                zone.apex, zone.get(DNSKEY), ds_records,
+                settings.ds_digest_types)
+            if matched and not unmatched:
+                log("info",
+                    "parent DS taken from the parent nameservers",
+                    apex=zone.apex.to_text(),
+                    ds=_ds_tags(ds_records))
     if not matched or unmatched:
         detail = ""
         if matched and unmatched:

@@ -61,7 +61,7 @@ def admit(body: dict, url_apex, settings, store, lookup, _notifier,
         lookup_started = time.perf_counter()
         try:
             delegation = parent_checks(zone, settings, lookup)
-            matched = ds_matches(zone, delegation, settings)
+            matched = ds_matches(zone, delegation, settings, lookup)
         except ApiError as exc:
             _remember_parent_failure(store, settings, url_apex.to_text(), exc)
             raise

@@ -30,7 +30,11 @@ from dns_host.doh import Lookup, LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.logutil import log
 from dns_host.names import normalise_name
-from dns_host.parent_ns import fetch_delegation_ns, harvest_lookup_glue
+from dns_host.parent_ns import (
+    fetch_delegation_ns,
+    harvest_lookup_glue,
+    query_parent_servers,
+)
 
 DS = dns.rdatatype.DS
 NS = dns.rdatatype.NS
@@ -48,6 +52,10 @@ class Delegation:
     ns_names: list
     ds_rrset: dns.rrset.RRset | None
     proved_ds_absent: bool
+    # Kept so the DS can be asked of the parent directly if it looks stale.
+    parent_keys: dns.rrset.RRset | None = None
+    parent_servers: list | None = None
+    glue: dict | None = None
 
 
 class _Budget:
@@ -241,6 +249,9 @@ def _walk_from_root(lookup,
                 ns_names=[rdata.target for rdata in ns_rrset],
                 ds_rrset=ds_rrset,
                 proved_ds_absent=proved_absent,
+                parent_keys=parent_keys,
+                parent_servers=list(parent_servers),
+                glue=glue,
             )
         if proved_absent:
             raise ApiError(
@@ -275,6 +286,50 @@ def _walk_from_root(lookup,
         parent_keys = child_dnskey
         parent_servers = [rdata.target.to_text() for rdata in auth_ns]
     raise ApiError(403, "parent_chain_invalid", f"walk did not reach {apex}")
+
+
+def direct_parent_ds(lookup, settings, apex, delegation: Delegation) -> list:
+    """DS rdatas for ``apex`` read from each parent nameserver with rd=0.
+
+    The resolver may still hold a DS RRset from before the parent changed
+    it, for up to the DS TTL. Each answer here must carry an RRSIG that
+    validates under the parent DNSKEY, or it is ignored. Returns the union
+    of the validated DS records. Transport failures give an empty list.
+    """
+
+    if delegation.parent_keys is None or not delegation.parent_servers:
+        return []
+    budget = _Budget(settings.max_doh_queries_per_walk)
+    now = settings.now()
+    found = []
+    try:
+        answers = query_parent_servers(lookup, settings, apex, "DS",
+                                       delegation.parent_servers,
+                                       delegation.glue, budget)
+    except LookupError as exc:
+        log("warning",
+            "direct parent DS lookup failed",
+            apex=apex.to_text(),
+            error=str(exc))
+        return []
+    for label, response in answers:
+        rrset, sigs = _extract(response, apex, "DS")
+        if rrset is None:
+            continue
+        try:
+            _verify(rrset, sigs, delegation.parent_zone,
+                    delegation.parent_keys, now, f"DS {apex}")
+        except ApiError as exc:
+            log("warning",
+                "direct parent DS did not validate",
+                apex=apex.to_text(),
+                server=label,
+                error=exc.message)
+            continue
+        for rdata in rrset:
+            if rdata not in found:
+                found.append(rdata)
+    return found
 
 
 def _cached_dnskey(lookup,
