@@ -222,6 +222,8 @@ def test_invalid_level_does_not_change_the_active_threshold(
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [item["msg"]
             for item in lines] == ["invalid configuration", "still-kept"]
+    assert lines[0]["error"].startswith(
+        "/opt/data/etc/config.yaml is invalid:\n")
     assert "invalid log_level" in lines[0]["error"]
 
 
