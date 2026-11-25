@@ -319,8 +319,7 @@ def ds_matches(zone: ParsedZone,
                lookup=None) -> list:
     ds_records = list(delegation.ds_rrset)
     matched, unmatched = match_ds_by_algorithm(zone.apex, zone.get(DNSKEY),
-                                               ds_records,
-                                               settings.ds_digest_types)
+                                               ds_records)
     if (not matched or unmatched) and lookup is not None:
         # The resolver can hold the DS RRset from before the parent last
         # changed it. Ask the parent's own nameservers before rejecting.
@@ -328,9 +327,9 @@ def ds_matches(zone: ParsedZone,
         fresh = ds_records + [ds for ds in direct if ds not in ds_records]
         if len(fresh) > len(ds_records):
             ds_records = fresh
-            matched, unmatched = match_ds_by_algorithm(
-                zone.apex, zone.get(DNSKEY), ds_records,
-                settings.ds_digest_types)
+            matched, unmatched = match_ds_by_algorithm(zone.apex,
+                                                       zone.get(DNSKEY),
+                                                       ds_records)
             if matched and not unmatched:
                 log("info",
                     "parent DS taken from the parent nameservers",

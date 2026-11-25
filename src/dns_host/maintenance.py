@@ -147,8 +147,7 @@ def _delegation_matches(zone, delegation, settings) -> bool:
             delegation.ds_rrset) == 0:
         return False
     matched = _keys_matching_ds(zone.apex, zone.get(dns_dnskey()),
-                                list(delegation.ds_rrset),
-                                settings.ds_digest_types)
+                                list(delegation.ds_rrset))
     return bool(matched)
 
 

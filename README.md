@@ -115,7 +115,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 
 `log_level` is a syslog severity name, matched without regard to case: `debug`, `info`, `notice`, `warning` (also `warn`), `err` (also `error`), `crit`, `alert`, `emerg`. Aliases are stored as the syslog name (`warn` becomes `warning`, `error` becomes `err`). The application `log()` drops anything less severe than this level, on stdout and on syslog. The same value sets the gunicorn `error`, `access`, and root loggers: `notice` is Python `INFO`, `err` is Python `ERROR`, and `crit`, `alert`, and `emerg` are Python `CRITICAL`. Production typically uses `warning`, which leaves routine per-request lines (a zone accepted or rejected, a rate limit, a NOTIFY that was sent) out of the log. An unrecognised value stops the process with a config validation error.
 
-The example file lists the rate limits, the serial window, and the DS digest list. `handshake_root_servers` and `handshake_trust_anchor_file` together enable a second walk when the name is proved absent from the ICANN root.
+The example file lists the rate limits and the serial window. `handshake_root_servers` and `handshake_trust_anchor_file` together enable a second walk when the name is proved absent from the ICANN root.
 
 Secondaries are one list. Each entry is an IP, an optional port, and an optional TSIG key name, secret (or `tsig_secret_file`), and algorithm. The generated NSD pattern emits `provide-xfr` and `notify` for those addresses. `axfr_allow` adds `provide-xfr` lines with `NOKEY` for each subnet, on the catalog zone and on the member pattern. Those subnets are not NOTIFY targets. A value that is not an IPv4 or IPv6 CIDR stops the process at startup.
 
@@ -258,7 +258,7 @@ Dev dependencies are pip-installed on the workstation and in CI. The image does 
 * **Secondary in CI.** dnspython performs AXFR in the tests. The container runs NSD as the relay. No Knot or BIND container.
 * **Limits.** 1 MiB body, 2000 RRsets, 1000 names, 4096-byte rdata, 30 uploads per IP per minute, 15 parent lookups per IP per minute.
 * **Extra parent NS names.** The apex NS set and the parent delegation must be equal, and both must include every `service_ns`. An extra name at the parent fails `ns_set_mismatch` unless the apex has it too.
-* **DS digests.** SHA-256 only, unless `ds_digest_types` lists more (1 = SHA-1, 4 = SHA-384).
+* **DS digests.** SHA-256 and SHA-384 are supported. SHA-256 is tried first for each algorithm, and SHA-384 is used only when SHA-256 does not match. SHA-1 is not accepted.
 * **Remaining RRSIG lifetime.** A signature only has to be valid now (`rrsig_min_remaining_seconds` defaults to 0). Lifetime is at most 30 days.
 * **Negative cache.** 60 seconds, one entry per apex (the latest parent-check failure).
 * **Apex text.** Trim, IDNA, lowercase, one trailing dot. The URL apex and the JSON apex must match after that.
