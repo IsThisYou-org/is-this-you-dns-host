@@ -103,7 +103,7 @@ def run_child(sock: socket.socket,
         try:
             handle_connection(conn, view, settings)
         except Exception as exc:
-            log("warning", "AXFR connection failed", error=str(exc))
+            log("error", "AXFR connection failed", error=repr(exc))
         finally:
             try:
                 conn.close()
@@ -141,10 +141,20 @@ def handle_connection(conn: socket.socket, view: CatalogView,
     view.refresh()
     apex = question.name.to_text().lower()
     if apex not in view.zones:
+        log("error",
+            "AXFR refused: zone not in catalog",
+            apex=apex,
+            catalog_serial=view.catalog.serial)
         _send(conn, _error(query, dns.rcode.REFUSED))
         return
-    blob = view.wire_for(apex)
+    try:
+        blob = view.wire_for(apex)
+    except Exception as exc:
+        log("error", "AXFR build failed", apex=apex, error=repr(exc))
+        _send(conn, _error(query, dns.rcode.SERVFAIL))
+        return
     if not blob:
+        log("error", "AXFR refused: zone file missing or empty", apex=apex)
         _send(conn, _error(query, dns.rcode.REFUSED))
         return
     conn.sendall(with_query_id(blob, query.id))

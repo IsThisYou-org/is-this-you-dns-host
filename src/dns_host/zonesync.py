@@ -110,8 +110,11 @@ class ZoneIndex:
                 document = json.loads(member.read_text(encoding="utf-8"))
                 zones[apex] = document_to_zone(dns.name.from_text(apex),
                                                document)
-        except Exception:
+        except Exception as exc:
             # Leave the previous snapshot in place and retry on the next poll.
+            from dns_host.logutil import log
+
+            log("error", "zone index refresh failed", error=repr(exc))
             return False
         self.zones = zones
         self.serials = serials

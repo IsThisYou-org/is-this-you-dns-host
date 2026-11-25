@@ -114,6 +114,10 @@ class UdpService:
         response = dns.message.make_response(query)
         response.flags |= dns.flags.AA
         if soa is None:
+            log("error",
+                "SOA refused: zone not in catalog",
+                apex=question.name.to_text().lower(),
+                catalog_serial=self.catalog.serial)
             response.set_rcode(dns.rcode.REFUSED)
         else:
             response.answer.append(soa)
