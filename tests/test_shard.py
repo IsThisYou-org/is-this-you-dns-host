@@ -48,7 +48,7 @@ def test_render_nsd_lists_only_the_catalog_zone():
     assert 'zonesdir: "/opt/data/nsd/zones"' in text
 
 
-def test_migrate_flat_files_is_idempotent(tmp_path, capsys):
+def test_migrate_flat_files_is_idempotent(tmp_path, syslog_lines):
     set_log_level("info")
     zones = tmp_path / "zones"
     zones.mkdir()
@@ -70,15 +70,17 @@ def test_migrate_flat_files_is_idempotent(tmp_path, capsys):
     assert (zones / "notes.txt").read_bytes() == b"no"
     assert (zones / "xfr.9").read_bytes() == b"temp"
     assert (zones / "subdir" / "other.axfr").read_bytes() == b"leave"
-    logged = capsys.readouterr().out
+    logged = "\n".join(syslog_lines)
     assert logged.count("moved flat zone file") == 1
 
+    syslog_lines.clear()
     assert migrate_flat_zone_files(zones) == 0
-    assert capsys.readouterr().out == ""
+    assert syslog_lines == []
     assert document.read_bytes() == b'{"apex":1}'
 
 
-def test_migrate_keeps_matching_shard_and_leaves_a_conflict(tmp_path, capsys):
+def test_migrate_keeps_matching_shard_and_leaves_a_conflict(
+        tmp_path, syslog_lines):
     set_log_level("info")
     zones = tmp_path / "zones"
     dest = zones / "2f" / "92"
@@ -87,17 +89,18 @@ def test_migrate_keeps_matching_shard_and_leaves_a_conflict(tmp_path, capsys):
     (zones / "james.isthisyou.me.json").write_bytes(b"wire")
     assert migrate_flat_zone_files(zones) == 1
     assert not (zones / "james.isthisyou.me.json").exists()
-    assert "removed flat zone file already in shard" in capsys.readouterr().out
+    assert "removed flat zone file already in shard" in "\n".join(syslog_lines)
 
+    syslog_lines.clear()
     (zones / "james.isthisyou.me.json").write_bytes(b"new")
     (dest / "james.isthisyou.me.json").write_bytes(b"old")
     assert migrate_flat_zone_files(zones) == 0
     assert (zones / "james.isthisyou.me.json").read_bytes() == b"new"
     assert (dest / "james.isthisyou.me.json").read_bytes() == b"old"
-    assert "differs from shard copy" in capsys.readouterr().out
+    assert "differs from shard copy" in "\n".join(syslog_lines)
 
 
-def test_old_nsd_hash_copies_are_deleted(tmp_path, capsys):
+def test_old_nsd_hash_copies_are_deleted(tmp_path, syslog_lines):
     set_log_level("info")
     zones = tmp_path / "nsd" / "zones"
     old = zones / "2f" / "92"
@@ -111,8 +114,8 @@ def test_old_nsd_hash_copies_are_deleted(tmp_path, capsys):
     assert not old.exists()
     assert (kept / "james.isthisyou.me.zone").read_bytes() == b"new"
     assert (zones / "catalog.zone").read_bytes() == b"catalog"
-    assert "deleted NSD zone file from the hash layout" in capsys.readouterr(
-    ).out
+    assert "deleted NSD zone file from the hash layout" in "\n".join(
+        syslog_lines)
     assert discard_nsd_fnv_zonefiles(zones) == 0
 
 

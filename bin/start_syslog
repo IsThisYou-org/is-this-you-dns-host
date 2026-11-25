@@ -1,5 +1,13 @@
-#!/bin/sh
-# Local syslog only. Logs are files under /opt/data/log, not a network listener.
-set -eu
+#! /bin/sh
+if test "${SYSLOG_SERVER}"
+	then
+		exec /sbin/syslogd -n -R ${SYSLOG_SERVER}
+	fi
+
+if test "${SYSLOG_STDOUT}" = "Y"
+	then
+		exec /sbin/syslogd -n -O -
+	fi
+
 mkdir -p /opt/data/log
 exec /sbin/syslogd -n -O /opt/data/log/messages -s 10240 -b 5

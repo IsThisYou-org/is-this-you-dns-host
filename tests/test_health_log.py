@@ -92,28 +92,27 @@ def test_gunicorn_access_logger_uses_the_health_filter():
 
 
 def test_app_log_skips_successful_health_and_keeps_failures(
-        env, monkeypatch, capsys):
+        env, monkeypatch, syslog_lines):
+    syslog_lines.clear()
     for path in ("/health", "/ext/health", "/int/health"):
         assert env.client.get(path).status_code == 200
-    assert capsys.readouterr().out == ""
+    assert syslog_lines == []
 
     with env.client.application.test_request_context("/ext/health"):
         log("info", "routine health")
         log("error", "health broke", error="dns down")
     with env.client.application.test_request_context("/config"):
         log("info", "config hit")
-    messages = [
-        json.loads(line)["msg"]
-        for line in capsys.readouterr().out.splitlines()
-    ]
+    messages = [json.loads(line)["msg"] for line in syslog_lines]
     assert messages == ["health broke", "config hit"]
 
+    syslog_lines.clear()
     env.settings.health_check_dns = True
     monkeypatch.setattr("dns_host.app._dns_soa_ok", lambda settings: False)
     failed = env.client.get("/health")
     assert failed.status_code == 503
     assert failed.get_json()["dns"] == "down"
-    body = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    body = [json.loads(line) for line in syslog_lines]
     assert body[-1]["msg"] == "health check failed"
     assert body[-1]["level"] == "error"
     assert body[-1]["path"] == "/health"

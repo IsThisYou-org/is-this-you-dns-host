@@ -1,14 +1,13 @@
 """One-line JSON logs.
 
-Records go to syslog (the container's busybox syslogd writes
-``/opt/data/log/messages``) and to stdout for a foreground run outside init.
-Messages below the configured ``log_level`` are dropped on both paths.
+Records go to syslog only. The container's busybox syslogd writes
+``/opt/data/log/messages`` by default. Messages below the configured
+``log_level`` are dropped.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 import syslog
 from datetime import datetime, timezone
 from typing import Any
@@ -136,4 +135,3 @@ def log(level: str, msg: str, **fields: Any) -> None:
         syslog.syslog(priority, line)
     except OSError:
         pass
-    print(line, file=sys.stdout, flush=True)

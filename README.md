@@ -34,7 +34,7 @@ Place a PEM containing both the certificate and the private key at `deploy/easy-
 | 8000/tcp | `127.0.0.1` | gunicorn. Fixed address. Not published. | no |
 | 9100/tcp | `0.0.0.0` | nginx metrics listener (`GET /metrics` only). Fixed port. Not published by Compose. | no |
 
-Syslog is local. busybox `syslogd` listens on the `/dev/log` socket and writes `/opt/data/log/messages`. It is not a network service; a networked syslog would use port 514.
+busybox `syslogd` listens on the `/dev/log` socket and does not accept incoming network syslog. Application logs go to that socket only. The default is `/opt/data/log/messages`. Set `SYSLOG_STDOUT=Y` to write the container's stdout instead, for testing. Set `SYSLOG_SERVER=<host[:port]>` to forward to a remote syslog server (port 514 when the port is omitted). `SYSLOG_SERVER` is checked first. When either variable is set, the local file is not written.
 
 NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds port 80 as root; workers run as `nginx`. Compose adds `NET_BIND_SERVICE` and starts the container as root so those binds succeed on a read-only root. After the drop, NSD writes zone state under `/opt/data/nsd` and its pid under `/run/nsd`. nginx writes its generated config to `/run/nginx/nginx.conf` (rewritten at every start) and its temp files under `/tmp`. Gunicorn's control socket is `/run/gunicorn.ctl` (`--control-socket`; gunicorn 25.2 would otherwise create `$HOME/.gunicorn/gunicorn.ctl`). `PYTHONDONTWRITEBYTECODE=1`. Pid files, sockets and temp paths are under `/run` or `/tmp`, which are `/dev/shm`.
 
@@ -51,7 +51,7 @@ The Docker `HEALTHCHECK` runs `/usr/local/bin/healthcheck` (`--interval=30s`, `-
 | `/opt/data/zones` | The zone body, one JSON file under `<hh>/<ll>/`. `catalogue.json` stays in this directory. |
 | `/opt/data/catalog` | Catalog file (zone names and full SOA records) and its mtime, which is the catalog SOA serial. One catalog, not sharded. |
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transfer state. NSD's zone copies are `zones/<c1>/<c2>/<name>.zone`. |
-| `/opt/data/log` | Syslog output |
+| `/opt/data/log` | Syslog output. The default file is `/opt/data/log/messages`. |
 | `/opt/data/host.db` | Zone metadata, admission, grace, and counters. The zone body is the JSON file, not a row in this database. |
 | `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the generated nginx config (`/run/nginx/nginx.conf`), nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
 
@@ -113,7 +113,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 | `max_body_bytes` / `max_rrsets` / `max_names` / `max_rdata_bytes` | 1 MiB / 2000 / 1000 / 4096 | Upload and rdata caps. |
 | `log_level` | `info` | Minimum severity for application logs and the gunicorn error, access, and root loggers. |
 
-`log_level` is a syslog severity name, matched without regard to case: `debug`, `info`, `notice`, `warning` (also `warn`), `err` (also `error`), `crit`, `alert`, `emerg`. Aliases are stored as the syslog name (`warn` becomes `warning`, `error` becomes `err`). The application `log()` drops anything less severe than this level, on stdout and on syslog. The same value sets the gunicorn `error`, `access`, and root loggers: `notice` is Python `INFO`, `err` is Python `ERROR`, and `crit`, `alert`, and `emerg` are Python `CRITICAL`. Production typically uses `warning`, which leaves routine per-request lines (a zone accepted or rejected, a rate limit, a NOTIFY that was sent) out of the log. An unrecognised value stops the process with a config validation error.
+`log_level` is a syslog severity name, matched without regard to case: `debug`, `info`, `notice`, `warning` (also `warn`), `err` (also `error`), `crit`, `alert`, `emerg`. Aliases are stored as the syslog name (`warn` becomes `warning`, `error` becomes `err`). The application `log()` drops anything less severe than this level before sending the line to syslog. The same value sets the gunicorn `error`, `access`, and root loggers: `notice` is Python `INFO`, `err` is Python `ERROR`, and `crit`, `alert`, and `emerg` are Python `CRITICAL`. Production typically uses `warning`, which leaves routine per-request lines (a zone accepted or rejected, a rate limit, a NOTIFY that was sent) out of the log. An unrecognised value stops the process with a config validation error.
 
 The example file lists the rate limits and the serial window. `handshake_root_servers` and `handshake_trust_anchor_file` together enable a second walk when the name is proved absent from the ICANN root.
 

@@ -22,7 +22,7 @@ def _ok(argv):
 
 
 def test_bad_tsig_algorithm_reaches_nsd_conf_and_stops(tmp_path, monkeypatch,
-                                                       capsys):
+                                                       syslog_lines):
     monkeypatch.setattr("dns_host.config.DATA_DIR", tmp_path)
     settings = Settings.from_mapping({
         "service_ns": ["ns1.example.net."],
@@ -47,20 +47,22 @@ def test_bad_tsig_algorithm_reaches_nsd_conf_and_stops(tmp_path, monkeypatch,
     written = tmp_path / "nsd" / "nsd.conf"
     assert "algorithm: not-a-real-algorithm" in written.read_text(
         encoding="utf-8")
-    logged = capsys.readouterr().out
+    logged = "\n".join(syslog_lines)
     assert str(written) in logged
     assert "unknown algorithm not-a-real-algorithm" in logged
     assert "config.yaml is the likely cause" in logged
     assert '"level":"error"' in logged
 
+    syslog_lines.clear()
     with pytest.raises(SystemExit):
         write_nsd_config(settings)
-    again = capsys.readouterr().out
+    again = "\n".join(syslog_lines)
     assert "unknown algorithm not-a-real-algorithm" in again
     assert '"level":"error"' in again
 
 
-def test_a_new_checker_error_is_logged_again(tmp_path, monkeypatch, capsys):
+def test_a_new_checker_error_is_logged_again(tmp_path, monkeypatch,
+                                             syslog_lines):
     monkeypatch.setattr("dns_host.config.DATA_DIR", tmp_path)
     settings = Settings.from_mapping({"service_ns": ["ns1.example.net."]})
     messages = iter(("first problem", "second problem"))
@@ -71,13 +73,15 @@ def test_a_new_checker_error_is_logged_again(tmp_path, monkeypatch, capsys):
     )
     with pytest.raises(SystemExit):
         write_nsd_config(settings)
-    assert "first problem" in capsys.readouterr().out
+    assert "first problem" in "\n".join(syslog_lines)
+    syslog_lines.clear()
     with pytest.raises(SystemExit):
         write_nsd_config(settings)
-    assert "second problem" in capsys.readouterr().out
+    assert "second problem" in "\n".join(syslog_lines)
 
 
-def test_a_valid_nsd_config_is_checked_and_kept(tmp_path, monkeypatch, capsys):
+def test_a_valid_nsd_config_is_checked_and_kept(tmp_path, monkeypatch,
+                                                syslog_lines):
     monkeypatch.setattr("dns_host.config.DATA_DIR", tmp_path)
     settings = Settings.from_mapping({"service_ns": ["ns1.example.net."]})
     seen = []
@@ -91,11 +95,11 @@ def test_a_valid_nsd_config_is_checked_and_kept(tmp_path, monkeypatch, capsys):
     assert path.is_file()
     assert seen == [["nsd-checkconf", str(path)]]
     assert "server:" in path.read_text(encoding="utf-8")
-    assert capsys.readouterr().out == ""
+    assert syslog_lines == []
 
 
 def test_nginx_checker_failure_stops_before_exec(tmp_path, monkeypatch,
-                                                 capsys):
+                                                 syslog_lines):
     conf = tmp_path / "nginx.conf"
     monkeypatch.setattr("dns_host.serve_nginx.NGINX_CONF", conf)
     monkeypatch.setattr("dns_host.serve_nginx.NGINX_TEMP_DIRS",
@@ -115,7 +119,7 @@ def test_nginx_checker_failure_stops_before_exec(tmp_path, monkeypatch,
     assert raised.value.code == 1
     assert (tmp_path / "body").is_dir()
     assert (tmp_path / "log").is_dir()
-    logged = capsys.readouterr().out
+    logged = "\n".join(syslog_lines)
     assert str(conf) in logged
     assert "unexpected end of file" in logged
     assert "config.yaml is the likely cause" in logged

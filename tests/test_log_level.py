@@ -120,8 +120,7 @@ def test_example_config_leaves_log_level_commented():
         assert f"`{name}`" in readme
 
 
-def test_log_drops_messages_below_the_configured_level_on_stdout_and_syslog(
-        capsys, monkeypatch):
+def test_log_drops_messages_below_the_configured_level(capsys, monkeypatch):
     recorded = []
     monkeypatch.setattr(logutil, "_opened", False)
     monkeypatch.setattr(syslog, "openlog", lambda *args, **kwargs: None)
@@ -142,8 +141,9 @@ def test_log_drops_messages_below_the_configured_level_on_stdout_and_syslog(
     log("alert", "kept-alert")
     log("emerg", "kept-emerg")
 
-    stdout = capsys.readouterr().out.splitlines()
-    assert [json.loads(line)["msg"] for line in stdout] == [
+    assert capsys.readouterr().out == ""
+    lines = [line for _priority, line in recorded]
+    assert [json.loads(line)["msg"] for line in lines] == [
         "kept-warning",
         "kept-warn",
         "kept-error",
@@ -152,7 +152,6 @@ def test_log_drops_messages_below_the_configured_level_on_stdout_and_syslog(
         "kept-alert",
         "kept-emerg",
     ]
-    assert [line for _priority, line in recorded] == stdout
     assert [priority for priority, _line in recorded] == [
         syslog.LOG_WARNING,
         syslog.LOG_WARNING,
@@ -162,8 +161,8 @@ def test_log_drops_messages_below_the_configured_level_on_stdout_and_syslog(
         syslog.LOG_ALERT,
         syslog.LOG_EMERG,
     ]
-    assert json.loads(stdout[2])["level"] == "error"
-    assert "client_ip" not in json.loads(stdout[0])
+    assert json.loads(lines[2])["level"] == "error"
+    assert "client_ip" not in json.loads(lines[0])
 
 
 def test_debug_threshold_emits_every_level_with_its_syslog_priority(
@@ -177,9 +176,9 @@ def test_debug_threshold_emits_every_level_with_its_syslog_priority(
     set_log_level("DeBuG")
     for name in _ORDER:
         log(name, name)
-    captured = capsys.readouterr().out
+    assert capsys.readouterr().out == ""
     assert [json.loads(line)["msg"]
-            for line in captured.splitlines()] == list(_ORDER)
+            for _priority, line in recorded] == list(_ORDER)
     assert [priority for priority, _line in recorded] == [
         syslog.LOG_DEBUG,
         syslog.LOG_INFO,
@@ -196,30 +195,34 @@ def test_notice_keeps_notice_and_drops_info(capsys, monkeypatch):
     recorded = []
     monkeypatch.setattr(logutil, "_opened", False)
     monkeypatch.setattr(syslog, "openlog", lambda *args, **kwargs: None)
-    monkeypatch.setattr(syslog, "syslog",
-                        lambda priority, line: recorded.append(priority))
+    monkeypatch.setattr(
+        syslog, "syslog", lambda priority, line: recorded.append(
+            (priority, line)))
     Settings(log_level="notice")
     log("info", "hidden")
     log("notice", "kept")
     log("warning", "also")
-    assert [
-        json.loads(line)["msg"]
-        for line in capsys.readouterr().out.splitlines()
-    ] == ["kept", "also"]
-    assert recorded == [syslog.LOG_NOTICE, syslog.LOG_WARNING]
+    assert capsys.readouterr().out == ""
+    assert [json.loads(line)["msg"]
+            for _priority, line in recorded] == ["kept", "also"]
+    assert [priority for priority, _line in recorded
+            ] == [syslog.LOG_NOTICE, syslog.LOG_WARNING]
 
 
 def test_invalid_level_does_not_change_the_active_threshold(
         capsys, monkeypatch):
+    recorded = []
     monkeypatch.setattr(logutil, "_opened", False)
     monkeypatch.setattr(syslog, "openlog", lambda *args, **kwargs: None)
-    monkeypatch.setattr(syslog, "syslog", lambda priority, line: None)
+    monkeypatch.setattr(syslog, "syslog",
+                        lambda priority, line: recorded.append(line))
     set_log_level("warning")
     with pytest.raises(SystemExit):
         Settings.from_mapping({"log_level": "verbose"})
     log("info", "still-hidden")
     log("warning", "still-kept")
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert capsys.readouterr().out == ""
+    lines = [json.loads(line) for line in recorded]
     assert [item["msg"]
             for item in lines] == ["invalid configuration", "still-kept"]
     assert lines[0]["error"].startswith(
@@ -292,6 +295,21 @@ def test_missing_config_leaves_gunicorn_at_info(tmp_path, monkeypatch):
         compile(_GUNICORN.read_text(encoding="utf-8"), str(_GUNICORN), "exec"),
         namespace)
     assert namespace["logconfig_dict"]["root"]["level"] == "INFO"
+
+
+def test_start_syslog_defaults_to_the_file_and_honours_env():
+    text = (_ROOT / "bin" / "start_syslog").read_text(encoding="utf-8")
+    assert 'if test "${SYSLOG_SERVER}"' in text
+    assert text.index('if test "${SYSLOG_SERVER}"') < text.index(
+        'if test "${SYSLOG_STDOUT}" = "Y"')
+    assert 'exec /sbin/syslogd -n -R ${SYSLOG_SERVER}' in text
+    assert "exec /sbin/syslogd -n -O -" in text
+    assert ("exec /sbin/syslogd -n -O /opt/data/log/messages -s 10240 -b 5"
+            in text)
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "SYSLOG_STDOUT=Y" in readme
+    assert "SYSLOG_SERVER=<host[:port]>" in readme
+    assert "The default is `/opt/data/log/messages`." in readme
 
 
 def test_per_request_logs_are_info_or_debug():

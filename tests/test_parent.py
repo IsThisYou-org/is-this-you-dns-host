@@ -262,7 +262,7 @@ def test_handshake_root_data_uses_rd0_at_the_handshake_server(env):
     assert all(call["type"] == "NS" and call["rd"] == 0 for call in direct)
 
 
-def test_lookup_error_text_is_logged_and_returned(env, capsys):
+def test_lookup_error_text_is_logged_and_returned(env, syslog_lines):
     set_log_level("info")
 
     class Boom:
@@ -286,10 +286,7 @@ def test_lookup_error_text_is_logged_and_returned(env, capsys):
     assert err.status == 503
     assert err.error == "parent_lookup_unavailable"
     assert err.message == "DNSKEY lookup for . failed: resolver request failed: attempt 2"
-    logged = []
-    for line in capsys.readouterr().out.splitlines():
-        if line.startswith("{"):
-            logged.append(json.loads(line))
+    logged = [json.loads(line) for line in syslog_lines]
     warnings = [
         item for item in logged if item.get("msg") == "parent lookup failed"
     ]
