@@ -1,10 +1,12 @@
 """Strict checks for /opt/data/etc/config.yaml."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from dns_host.config import CONFIG_PATH, Settings, _INT_FIELDS
+from dns_host.logutil import set_log_level
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -178,6 +180,49 @@ def test_ds_digest_types_is_rejected_as_an_unknown_key():
                        match="unknown key 'ds_digest_types'") as raised:
         Settings.from_mapping({"ds_digest_types": [2, 4]})
     assert raised.value.__cause__ is None
+
+
+def test_duplicate_top_level_key_warns_with_both_line_numbers(
+        tmp_path, syslog_lines):
+    set_log_level("info")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "secondaries:\n  - ip: 192.0.2.10\nsecondaries: []\n",
+        encoding="utf-8",
+    )
+    settings = Settings.load(path)
+    assert settings.secondaries == []
+    assert len(syslog_lines) == 1
+    record = json.loads(syslog_lines[0])
+    assert record["level"] == "warning"
+    assert record["msg"] == (
+        "duplicate key 'secondaries' at lines 1 and 3; the later one wins")
+    assert record["key"] == "secondaries"
+    assert record["first_line"] == 1
+    assert record["later_line"] == 3
+
+
+def test_duplicate_nested_key_warns_and_keeps_the_later_value(
+        tmp_path, syslog_lines):
+    set_log_level("info")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "secondaries:\n  - ip: 192.0.2.10\n    ip: 192.0.2.11\n",
+        encoding="utf-8",
+    )
+    settings = Settings.load(path)
+    assert [item.host for item in settings.secondaries] == ["192.0.2.11"]
+    record = json.loads(syslog_lines[0])
+    assert record["level"] == "warning"
+    assert record["msg"] == (
+        "duplicate key 'ip' at lines 2 and 3; the later one wins")
+
+
+def test_normal_config_does_not_warn_about_duplicate_keys(syslog_lines):
+    set_log_level("info")
+    Settings.load(_ROOT / "deploy/config.example.yaml")
+    Settings.load(_ROOT / "deploy/config.tls.yaml")
+    assert syslog_lines == []
 
 
 def test_example_config_loads(monkeypatch):

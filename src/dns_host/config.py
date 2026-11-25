@@ -416,8 +416,7 @@ class Settings:
             import yaml
 
             try:
-                loaded = yaml.safe_load(
-                    config_path.read_text(encoding="utf-8"))
+                loaded = _load_yaml(config_path.read_text(encoding="utf-8"))
             except yaml.YAMLError as exc:
                 _fail([f"{config_path} is not valid YAML: {exc}"], config_path)
             if loaded is None:
@@ -509,6 +508,58 @@ class Settings:
             trusted_proxies=proxies,
             health_check_dns=health,
             log_level=log_level,
+        )
+
+
+def _load_yaml(text: str):
+    """Parse YAML, warning when one mapping defines a key twice.
+
+    PyYAML keeps the later value and does not report the earlier one.
+    Start-up continues. Nested mappings are checked the same way.
+    """
+
+    import yaml
+
+    loader = getattr(_load_yaml, "_loader", None)
+    if loader is None:
+
+        class _DuplicateKeyLoader(yaml.SafeLoader):
+
+            def construct_mapping(self, node, deep=False):
+                _warn_duplicate_keys(self, node, deep)
+                return super().construct_mapping(node, deep)
+
+        loader = _DuplicateKeyLoader
+        _load_yaml._loader = loader
+    return yaml.load(text, Loader=loader)
+
+
+def _warn_duplicate_keys(loader, node, deep: bool) -> None:
+    import yaml
+
+    if not isinstance(node, yaml.MappingNode):
+        return
+    loader.flatten_mapping(node)
+    first: dict = {}
+    for key_node, _value_node in node.value:
+        try:
+            key = loader.construct_object(key_node, deep=deep)
+            seen = key in first
+        except TypeError:
+            continue
+        line = key_node.start_mark.line + 1
+        if not seen:
+            first[key] = line
+            continue
+        from dns_host.logutil import log
+
+        log(
+            "warning",
+            f"duplicate key {key!r} at lines {first[key]} and {line}; "
+            "the later one wins",
+            key=str(key),
+            first_line=first[key],
+            later_line=line,
         )
 
 

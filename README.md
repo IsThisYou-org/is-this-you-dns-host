@@ -110,7 +110,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 
 ## Configuration
 
-`/opt/data/etc/config.yaml` is the configuration. Environment variables are not read. Unknown keys are rejected. A value of the wrong type, an integer outside its range, an unknown RR type, or a failed cross-check is reported with the key name. Every problem is listed, one per line, and the process exits. `health_check_dns` is a YAML boolean (`true` or `false`); a quoted string or a number is rejected. A secondary's TSIG secret may be inline or in `tsig_secret_file` (a Docker secret mount is a normal place). Secrets are never taken from a zone upload. Port 80, NSD (`0.0.0.0:53`), the data directory (`/opt/data`), and the ICANN trust-anchor file (`/app/deploy/root-anchors.ds`) are fixed by the image. They are not configuration keys.
+`/opt/data/etc/config.yaml` is the configuration. Environment variables are not read. Unknown keys are rejected. A key repeated in one mapping is a warning, not an error: both line numbers are logged and the later value wins. A value of the wrong type, an integer outside its range, an unknown RR type, or a failed cross-check is reported with the key name. Every problem is listed, one per line, and the process exits. `health_check_dns` is a YAML boolean (`true` or `false`); a quoted string or a number is rejected. A secondary's TSIG secret may be inline or in `tsig_secret_file` (a Docker secret mount is a normal place). Secrets are never taken from a zone upload. Port 80, NSD (`0.0.0.0:53`), the data directory (`/opt/data`), and the ICANN trust-anchor file (`/app/deploy/root-anchors.ds`) are fixed by the image. They are not configuration keys.
 
 | Key | Default | Role |
 | --- | --- | --- |
