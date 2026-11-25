@@ -85,8 +85,8 @@ _INT_FIELDS: dict[str, tuple[int, int, int]] = {
     "apexes_per_parent_per_day": (0, 0, _COUNT_MAX),
     "doh_cd": (1, 0, 1),
     "maintenance_interval_seconds": (300, 1, _TIME_MAX),
-    "soa_refresh": (3600, 1, _TIME_MAX),
-    "soa_retry": (600, 1, _TIME_MAX),
+    "soa_refresh": (60, 1, _TIME_MAX),
+    "soa_retry": (60, 1, _TIME_MAX),
     "soa_expire": (864000, 1, _TIME_MAX),
     "soa_minimum": (300, 0, _TIME_MAX),
     "catalog_ttl": (300, 0, _TIME_MAX),
@@ -345,8 +345,8 @@ class Settings:
     handshake_root_servers: list = field(default_factory=list)
     handshake_trust_anchors: list = field(default_factory=list)
     maintenance_interval_seconds: int = 300
-    soa_refresh: int = 3600
-    soa_retry: int = 600
+    soa_refresh: int = 60
+    soa_retry: int = 60
     soa_expire: int = 864000
     soa_minimum: int = 300
     catalog_ttl: int = 300
@@ -848,10 +848,10 @@ def _cross_checks(values: dict[str, int], failed: set[str],
             f"invalid min_ttl {values['min_ttl']}: must be less than or equal "
             f"to max_ttl {values['max_ttl']}")
     if (ready("soa_retry", "soa_refresh")
-            and values["soa_retry"] >= values["soa_refresh"]):
+            and values["soa_retry"] > values["soa_refresh"]):
         errors.append(
             f"invalid soa_retry {values['soa_retry']}: must be less than "
-            f"soa_refresh {values['soa_refresh']}")
+            f"or equal to soa_refresh {values['soa_refresh']}")
     if (ready("soa_expire", "soa_refresh")
             and values["soa_expire"] <= values["soa_refresh"]):
         errors.append(

@@ -45,6 +45,12 @@ class Catalog:
     def wire_path(self) -> Path:
         return self.path.with_suffix(".axfr")
 
+    @property
+    def loaded(self) -> bool:
+        """True once a real catalog file has been read."""
+
+        return self.mtime_ns is not None
+
     def has(self, apex: str) -> bool:
         return apex in self.zones
 
@@ -60,7 +66,15 @@ class Catalog:
             self.zones = {}
             self.mtime_ns = None
             return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        # Take the mtime before and after the read. A replace in between
+        # would pair old member data with the new mtime, and readers that
+        # compare mtimes would then keep the stale member list.
+        for _attempt in range(5):
+            before = self.path.stat().st_mtime_ns
+            text = self.path.read_text(encoding="utf-8")
+            if self.path.stat().st_mtime_ns == before:
+                break
+        data = json.loads(text)
         zones = {}
         for item in data.get("zones", []):
             zones[item["apex"]] = Member(
@@ -74,8 +88,8 @@ class Catalog:
         self.zones = zones
         # The served catalog SOA serial is the file mtime. ``save`` sets that
         # mtime to max(now, last+1), so the two stay equal.
-        self.serial = int(self.path.stat().st_mtime)
-        self.mtime_ns = self.path.stat().st_mtime_ns
+        self.serial = int(before // 1_000_000_000)
+        self.mtime_ns = before
 
     def save(self, now: int) -> int:
         self.serial = next_catalog_serial(self.serial, now)

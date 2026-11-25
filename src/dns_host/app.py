@@ -166,7 +166,7 @@ def create_app(settings: Settings | None = None,
             if serial is None:
                 continue
             store.incr("zones_dropped")
-            log("info",
+            log("error",
                 "zone dropped",
                 apex=str(apex),
                 reason=reason,

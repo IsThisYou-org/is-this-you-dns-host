@@ -194,7 +194,7 @@ def test_example_config_loads(monkeypatch):
     assert settings.health_check_dns is True
     assert settings.gunicorn_workers == 3
     assert settings.min_ttl <= settings.max_ttl
-    assert settings.soa_retry < settings.soa_refresh < settings.soa_expire
+    assert settings.soa_retry <= settings.soa_refresh < settings.soa_expire
     assert [name.to_text() for name in settings.service_ns] == [
         "ns1.example.net.",
         "ns2.example.net.",
@@ -253,3 +253,8 @@ def test_start_scripts_sleep_after_a_startup_error():
     assert "exec sleep 1002" in nsd
     assert "exec sleep 1003" not in nginx
     assert "exec sleep 1003" not in nsd
+
+
+def test_soa_retry_may_equal_soa_refresh():
+    settings = Settings.from_mapping({"soa_retry": 60, "soa_refresh": 60})
+    assert settings.soa_retry == settings.soa_refresh == 60

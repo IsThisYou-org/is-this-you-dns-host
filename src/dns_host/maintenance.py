@@ -98,7 +98,11 @@ class Maintenance:
                                     now=now,
                                     ok=False,
                                     drift_since=since)
-        log("info", "parent drift", apex=row.apex, reason=reason, since=since)
+        log("warning",
+            "parent drift",
+            apex=row.apex,
+            reason=reason,
+            since=since)
         if now > since + self.settings.grace_seconds:
             self._drop(row.apex, now, "parent drift grace elapsed")
 
@@ -109,7 +113,7 @@ class Maintenance:
         if serial is None:
             return
         self.store.incr("zones_dropped")
-        log("info",
+        log("error",
             "zone dropped",
             apex=apex,
             reason=reason,
@@ -258,7 +262,7 @@ class RemoteMaintenance:
                 "drift_since": since
             },
         )
-        log("info",
+        log("warning",
             "parent drift",
             apex=row["apex"],
             reason=reason,

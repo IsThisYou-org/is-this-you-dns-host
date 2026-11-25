@@ -74,6 +74,8 @@ class Controller:
     def remove(self, apex: str, now: int) -> int | None:
         self.catalog.load()
         had = apex in self.catalog.zones
+        if had:
+            log("error", "removing zone from the catalog", apex=apex)
         self.catalog.zones.pop(apex, None)
         sql_serial = self.store.delete_zone(apex, now)
         if not had and sql_serial is None:
@@ -95,16 +97,27 @@ class Controller:
             return False
         held = self.catalog.serial_of(job.apex)
         if held is not None and job.serial <= held:
+            # The API accepted this upload, so not installing it is an error.
             log(
-                "info",
-                "dropping spool file whose SOA serial is not higher",
+                "error",
+                "accepted zone not installed: SOA serial is not higher",
                 apex=job.apex,
                 serial=job.serial,
                 held=held,
             )
             path.unlink(missing_ok=True)
             return False
-        self._remember_sqlite(job)
+        try:
+            self._remember_sqlite(job)
+        except Exception as exc:
+            # Leaving the file would retry it every poll for ever.
+            log("error",
+                "accepted zone not installed",
+                apex=job.apex,
+                serial=job.serial,
+                error=str(exc))
+            path.unlink(missing_ok=True)
+            return False
         self.catalog.zones[job.apex] = Member(
             apex=job.apex,
             serial=job.serial,
@@ -151,7 +164,7 @@ class Controller:
         for apex in removed:
             self.catalog.zones.pop(apex, None)
             self.store.delete_zone(apex, now)
-            log("info",
+            log("error",
                 "zone aged out",
                 apex=apex,
                 reason="rrsig grace elapsed")

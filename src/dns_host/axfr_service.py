@@ -49,10 +49,16 @@ class CatalogView:
         if mtime_ns == self._mtime_ns:
             return False
         self.catalog.load()
+        if not self.catalog.loaded:
+            return False
         self.zones = set(self.catalog.zones)
         self.zones.add(self.settings.catalog_zone.to_text())
         self._mtime_ns = self.catalog.mtime_ns
         return True
+
+    @property
+    def loaded(self) -> bool:
+        return self.catalog.loaded
 
     def wire_for(self, apex: str) -> bytes | None:
         if apex == self.settings.catalog_zone.to_text():
@@ -74,9 +80,15 @@ class CatalogView:
 
 
 def bind_listener(settings) -> socket.socket:
-    """Bind the fixed internal listener. ``settings`` is accepted for callers."""
+    """Bind the fixed internal listener once the real catalog has loaded.
 
-    del settings
+    Load first, then listen: nothing accepts a connection before the
+    catalog file has been read, so an empty catalog is never served.
+    """
+
+    from dns_host.udp_service import wait_for_catalog
+
+    wait_for_catalog(Catalog(settings))
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((DNS_BIND, DNS_PORT))
@@ -103,7 +115,7 @@ def run_child(sock: socket.socket,
         try:
             handle_connection(conn, view, settings)
         except Exception as exc:
-            log("warning", "AXFR connection failed", error=str(exc))
+            log("error", "AXFR connection failed", error=repr(exc))
         finally:
             try:
                 conn.close()
@@ -141,10 +153,20 @@ def handle_connection(conn: socket.socket, view: CatalogView,
     view.refresh()
     apex = question.name.to_text().lower()
     if apex not in view.zones:
+        log("error",
+            "AXFR refused: zone not in catalog",
+            apex=apex,
+            catalog_serial=view.catalog.serial)
         _send(conn, _error(query, dns.rcode.REFUSED))
         return
-    blob = view.wire_for(apex)
+    try:
+        blob = view.wire_for(apex)
+    except Exception as exc:
+        log("error", "AXFR build failed", apex=apex, error=repr(exc))
+        _send(conn, _error(query, dns.rcode.SERVFAIL))
+        return
     if not blob:
+        log("error", "AXFR refused: zone file missing or empty", apex=apex)
         _send(conn, _error(query, dns.rcode.REFUSED))
         return
     conn.sendall(with_query_id(blob, query.id))
