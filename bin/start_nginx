@@ -7,4 +7,6 @@ while [ ! -S /dev/log ] && [ "$i" -lt 50 ]; do
 done
 mkdir -p /run/nginx /tmp/nginx-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi /tmp/nginx-log
 chmod 1777 /tmp/nginx-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi
-exec python3 -m dns_host.serve_nginx
+# 1001 is nginx's config-check failure. ps shows "sleep 1001".
+python3 -m dns_host.serve_nginx || exec sleep 1001
+exec nginx -e /tmp/nginx-startup.log -c /run/nginx/nginx.conf -g "daemon off;"

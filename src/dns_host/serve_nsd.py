@@ -1,4 +1,7 @@
-"""Wait for nsd.conf, install control keys, and exec NSD in the foreground.
+"""Write nsd.conf, check it, and install control keys.
+
+``bin/start_nsd`` execs NSD after this succeeds, or ``sleep 1002`` when
+the check fails.
 
 NSD binds port 53 as root, then drops to the ``nsd`` user. State it must
 write after that drop lives under ``/opt/data/nsd``, which is chowned first.
@@ -44,7 +47,6 @@ def main() -> None:
     ensure_control_keys(directory)
     _chown_tree(directory, "nsd")
     _chown_tree(runtime, "nsd")
-    os.execvp("nsd", ["nsd", "-d", "-c", str(path)])
 
 
 if __name__ == "__main__":

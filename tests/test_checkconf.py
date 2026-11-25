@@ -8,12 +8,9 @@ import pytest
 from dns_host import checkconf
 from dns_host.config import Settings
 from dns_host.nsdconf import render_nsd, write_nsd_config
-from dns_host.serve_nginx import NGINX_CONF, write_nginx_config
+from dns_host.serve_nginx import NGINX_CONF, main, write_nginx_config
 
-
-@pytest.fixture(autouse=True)
-def _stamp_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(checkconf, "STAMP_DIR", tmp_path / "stamps")
+_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _failed(argv, stderr: str):
@@ -58,7 +55,9 @@ def test_bad_tsig_algorithm_reaches_nsd_conf_and_stops(tmp_path, monkeypatch,
 
     with pytest.raises(SystemExit):
         write_nsd_config(settings)
-    assert capsys.readouterr().out == ""
+    again = capsys.readouterr().out
+    assert "unknown algorithm not-a-real-algorithm" in again
+    assert '"level":"error"' in again
 
 
 def test_a_new_checker_error_is_logged_again(tmp_path, monkeypatch, capsys):
@@ -107,9 +106,6 @@ def test_nginx_checker_failure_stops_before_exec(tmp_path, monkeypatch,
         lambda argv, **kwargs: _failed(
             argv, "nginx: [emerg] unexpected end of file"),
     )
-    executed = []
-    monkeypatch.setattr("dns_host.serve_nginx.os.execvp",
-                        lambda *args: executed.append(args))
     settings = Settings.from_mapping({
         "service_ns": ["ns1.example.net."],
         "max_body_bytes": 100,
@@ -117,7 +113,6 @@ def test_nginx_checker_failure_stops_before_exec(tmp_path, monkeypatch,
     with pytest.raises(SystemExit) as raised:
         write_nginx_config(settings)
     assert raised.value.code == 1
-    assert executed == []
     assert (tmp_path / "body").is_dir()
     assert (tmp_path / "log").is_dir()
     logged = capsys.readouterr().out
@@ -126,9 +121,7 @@ def test_nginx_checker_failure_stops_before_exec(tmp_path, monkeypatch,
     assert "config.yaml is the likely cause" in logged
 
 
-def test_nginx_good_path_checks_then_execs(tmp_path, monkeypatch):
-    from dns_host.serve_nginx import main
-
+def test_nginx_good_path_checks_then_returns(tmp_path, monkeypatch):
     conf = tmp_path / "nginx" / "nginx.conf"
     monkeypatch.setattr("dns_host.serve_nginx.NGINX_CONF", conf)
     monkeypatch.setattr("dns_host.serve_nginx.NGINX_TEMP_DIRS",
@@ -139,22 +132,30 @@ def test_nginx_good_path_checks_then_execs(tmp_path, monkeypatch):
         "run",
         lambda argv, **kwargs: seen.append(argv) or _ok(argv),
     )
-    executed = []
-    monkeypatch.setattr("dns_host.serve_nginx.os.execvp",
-                        lambda *args: executed.append(args))
     monkeypatch.setattr(
         "dns_host.serve_nginx.Settings.load",
         lambda: Settings.from_mapping({"service_ns": ["ns1.example.net."]}),
     )
-    main()
+    assert main() is None
     assert seen == [["nginx", "-t", "-c", str(conf)]]
     assert conf.is_file()
     assert "listen 80;" in conf.read_text(encoding="utf-8")
-    assert executed == [(
-        "nginx",
-        [
-            "nginx", "-e", "/tmp/nginx-startup.log", "-c",
-            str(conf), "-g", "daemon off;"
-        ],
-    )]
     assert NGINX_CONF == Path("/run/nginx/nginx.conf")
+
+
+def test_start_scripts_sleep_with_distinct_arguments():
+    nginx = (_ROOT / "bin/start_nginx").read_text(encoding="utf-8")
+    nsd = (_ROOT / "bin/start_nsd").read_text(encoding="utf-8")
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    assert nginx.index("python3 -m dns_host.serve_nginx") < nginx.index(
+        "exec sleep 1001")
+    assert nginx.index("exec sleep 1001") < nginx.index(
+        "exec nginx -e /tmp/nginx-startup.log -c /run/nginx/nginx.conf")
+    assert "exec python3 -m dns_host.serve_nginx" not in nginx
+    assert nsd.index("python3 -m dns_host.serve_nsd") < nsd.index(
+        "exec sleep 1002")
+    assert nsd.index("exec sleep 1002") < nsd.index(
+        "exec nsd -d -c /opt/data/nsd/nsd.conf")
+    assert "exec python3 -m dns_host.serve_nsd" not in nsd
+    assert "sleep 1001" in readme
+    assert "sleep 1002" in readme

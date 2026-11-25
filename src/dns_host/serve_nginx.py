@@ -1,12 +1,13 @@
-"""Write nginx.conf on tmpfs and exec nginx in the foreground.
+"""Write nginx.conf on tmpfs and check it.
 
 The file is regenerated at every start. The path is fixed at
 ``/run/nginx/nginx.conf``. ``/run`` is a symlink to ``/dev/shm``.
+``bin/start_nginx`` execs nginx after this succeeds, or ``sleep 1001``
+when the check fails.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from dns_host.checkconf import validate_generated
@@ -50,10 +51,6 @@ def main() -> None:
     settings.require_service_ns()
     log_effective(settings)
     write_nginx_config(settings)
-    os.execvp("nginx", [
-        "nginx", "-e", "/tmp/nginx-startup.log", "-c",
-        str(NGINX_CONF), "-g", "daemon off;"
-    ])
 
 
 if __name__ == "__main__":

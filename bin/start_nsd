@@ -1,4 +1,6 @@
 #!/bin/sh
 set -eu
 mkdir -p /opt/data/nsd/zones /opt/data/nsd/xfr /run
-exec python3 -m dns_host.serve_nsd
+# 1002 is NSD's config-check failure. ps shows "sleep 1002".
+python3 -m dns_host.serve_nsd || exec sleep 1002
+exec nsd -d -c /opt/data/nsd/nsd.conf
