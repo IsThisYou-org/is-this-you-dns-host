@@ -1,0 +1,84 @@
+#!/bin/sh
+# Exit 0 only when nginx /health and an NSD catalog SOA query both succeed.
+# The catalog zone name is read from the generated nsd.conf (the zone marked
+# "catalog: consumer"). Success prints nothing. Failure names the part.
+set -eu
+
+# Zone name from the catalog consumer block. Empty / missing file returns 1.
+catalog_zone_from_nsd() {
+  conf=$1
+  set -f
+  inzone=0
+  name=
+  if [ ! -r "$conf" ]; then
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      '' | \#*) continue ;;
+    esac
+    # Field-split the line. set -f above blocks globs; quotes are stripped below.
+    # shellcheck disable=SC2086
+    set -- $line
+    if [ $# -lt 1 ]; then
+      continue
+    fi
+    case $1 in
+      zone:)
+        inzone=1
+        name=
+        ;;
+      pattern: | server: | key: | remote-control:)
+        inzone=0
+        name=
+        ;;
+      name:)
+        if [ "$inzone" = 1 ] && [ $# -ge 2 ]; then
+          name=$2
+          name=${name#\"}
+          name=${name%\"}
+          name=${name#\'}
+          name=${name%\'}
+        fi
+        ;;
+      catalog:)
+        if [ "$inzone" = 1 ] && [ $# -ge 2 ] && [ "$2" = consumer ] && [ -n "$name" ]; then
+          printf '%s\n' "$name"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$conf"
+  return 1
+}
+
+fail=0
+
+if ! python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1/health', timeout=2).read()" >/dev/null 2>&1; then
+  echo "REST health check failed"
+  fail=1
+fi
+
+conf=${HEALTHCHECK_NSD_CONF:-/opt/data/nsd/nsd.conf}
+zone=$(catalog_zone_from_nsd "$conf") || zone=
+
+if [ -z "$zone" ]; then
+  echo "DNS health check failed: catalog zone not found in $conf"
+  fail=1
+else
+  case $zone in
+    *.) qname=$zone ;;
+    *) qname=$zone. ;;
+  esac
+  if ! dns_out=$(dig -N -s 127.0.0.1:53 -t SOA "$qname" 2>&1); then
+    echo "DNS health check failed"
+    if [ -n "$dns_out" ]; then
+      printf '%s\n' "$dns_out"
+    fi
+    fail=1
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  exit 1
+fi

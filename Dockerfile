@@ -38,13 +38,14 @@ RUN chmod 755 /usr/local/bin/start_up /usr/local/bin/start_syslog \
         /usr/local/bin/start_api /usr/local/bin/start_controller \
         /usr/local/bin/start_dns_udp /usr/local/bin/start_dns_axfr \
         /usr/local/bin/start_nsd /usr/local/bin/start_nginx \
-        /usr/local/bin/start_cron /usr/local/bin/start_shutdown
+        /usr/local/bin/start_cron /usr/local/bin/start_shutdown \
+        /usr/local/bin/healthcheck
 
 VOLUME ["/opt/data"]
 EXPOSE 80 53/tcp 53/udp 9100
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1/health', timeout=2).read()"
+    CMD ["/usr/local/bin/healthcheck"]
 
 COPY build.txt /usr/local/etc/build.txt
 CMD ["/usr/local/bin/start_up"]
