@@ -100,7 +100,7 @@ def test_every_catalog_serial_change_is_notified(settings, clock):
 
 
 def test_notify_is_held_until_the_axfr_listener_accepts(
-        settings, clock, capsys):
+        settings, clock, syslog_lines):
     """A closed AXFR port leaves the NOTIFY due. It is not a failed send."""
 
     _write_catalog(settings, [], clock.t)
@@ -128,14 +128,15 @@ def test_notify_is_held_until_the_axfr_listener_accepts(
     assert due <= 10
     assert int(next(iter(soa)).serial) == after.serial
     assert "a.example." in service._pending
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    lines = [json.loads(line) for line in syslog_lines]
     assert [row["msg"] for row in lines
             ] == ["waiting for the AXFR listener before NOTIFY"]
     assert lines[0]["bind"] == "127.0.0.1"
     assert lines[0]["port"] == 5353
+    syslog_lines.clear()
     service.flush_notifies(now=10)
     assert sent == []
-    assert capsys.readouterr().out == ""
+    assert syslog_lines == []
     holder.ok = True
     service.flush_notifies(now=10)
     assert sent == [(catalog, after.serial), ("a.example.", 1)]
@@ -181,7 +182,7 @@ def test_unacknowledged_notify_is_retried_with_backoff(settings, clock):
 
 
 def test_notify_is_logged_and_a_final_failure_is_a_warning(
-        settings, monkeypatch, capsys):
+        settings, monkeypatch, syslog_lines):
     """A send that will not be retried is logged once at warning."""
 
     soa = catalog_rrsets(settings, 5, [])[0]
@@ -207,7 +208,7 @@ def test_notify_is_logged_and_a_final_failure_is_a_warning(
 
     monkeypatch.setattr("dns.query.udp", down)
     assert notifier.notify("catalog.svc.test.", soa) is False
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    lines = [json.loads(line) for line in syslog_lines]
     assert [(r["level"], r["msg"]) for r in lines] == [
         ("info", "NOTIFY sent"),
         ("error", "NOTIFY rejected"),
@@ -225,7 +226,7 @@ def test_notify_is_logged_and_a_final_failure_is_a_warning(
 
 
 def test_notify_failure_is_warning_only_after_retries_run_out(
-        settings, monkeypatch, capsys):
+        settings, monkeypatch, syslog_lines):
     """The warning names the apex, serial, target, attempts and last error."""
 
     soa = catalog_rrsets(settings, 5, [])[0]
@@ -239,7 +240,7 @@ def test_notify_failure_is_warning_only_after_retries_run_out(
                            soa,
                            attempt=4,
                            will_retry=False) is False
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    lines = [json.loads(line) for line in syslog_lines]
     assert len(lines) == 1
     row = lines[0]
     assert row["level"] == "warning"
@@ -254,7 +255,7 @@ def test_notify_failure_is_warning_only_after_retries_run_out(
 
 
 def test_retried_notify_failure_is_info_and_backoff_is_unchanged(
-        settings, monkeypatch, capsys):
+        settings, monkeypatch, syslog_lines):
     """Each try that will be sent again is info, with the same backoff."""
 
     monkeypatch.setattr(UdpNotifier, "master_ready", lambda self: True)
@@ -278,7 +279,7 @@ def test_retried_notify_failure_is_info_and_backoff_is_unchanged(
         dues.append((attempts, due))
         now = due
     assert dues == [(1, 2), (2, 6), (3, 14), (4, 30), (5, 62), (6, 122)]
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    lines = [json.loads(line) for line in syslog_lines]
     assert len(lines) == 6
     for number, row in enumerate(lines, start=1):
         assert row["level"] == "info"
@@ -290,8 +291,9 @@ def test_retried_notify_failure_is_info_and_backoff_is_unchanged(
         assert row["attempt"] == number
         assert "attempts" not in row
     assert store.counts["notify_fail"] == 6
+    syslog_lines.clear()
     service.flush_notifies(now=dues[-1][1] - 1)
-    assert capsys.readouterr().out == ""
+    assert syslog_lines == []
 
     def answered(query, host, port=53, source=None, timeout=1):
         return dns.message.make_response(query)
@@ -299,7 +301,7 @@ def test_retried_notify_failure_is_info_and_backoff_is_unchanged(
     monkeypatch.setattr("dns.query.udp", answered)
     service.flush_notifies(now=122)
     assert service._pending == {}
-    sent = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    sent = [json.loads(line) for line in syslog_lines]
     assert [(row["level"], row["msg"])
             for row in sent] == [("info", "NOTIFY sent")]
     assert sent[0]["serial"] == 5

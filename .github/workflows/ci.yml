@@ -36,6 +36,8 @@ jobs:
             -v dns-ci-data:/opt/data \
             dns-host:ci
           cleanup() {
+            echo "---- /opt/data/log/messages ----"
+            docker exec dns-host-ci cat /opt/data/log/messages || true
             echo "---- docker logs ----"
             docker logs dns-host-ci || true
             echo "---- docker diff ----"

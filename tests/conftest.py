@@ -30,6 +30,24 @@ def clock():
 
 
 @pytest.fixture
+def syslog_lines(monkeypatch):
+    """JSON lines ``log()`` sends to syslog."""
+
+    recorded = []
+    monkeypatch.setattr("dns_host.logutil._opened", False)
+
+    def openlog(*_args, **_kwargs):
+        return None
+
+    def write(_priority, line):
+        recorded.append(line)
+
+    monkeypatch.setattr("syslog.openlog", openlog)
+    monkeypatch.setattr("syslog.syslog", write)
+    return recorded
+
+
+@pytest.fixture
 def lab(clock):
     return Lab(clock.t)
 
