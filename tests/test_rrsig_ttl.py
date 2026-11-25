@@ -113,7 +113,11 @@ def test_uri_ttl_survives_zone_push_upload_and_axfr(env, tmp_path):
 
     response = post(env, uploaded)
     assert response.status_code == 201, response.get_json()
-    stored = env.store.get_zone("user.example.").document
+    from dns_host.config import data_dir
+    from dns_host.zonesync import read_member
+
+    stored = read_member(data_dir() / "zones", "user.example.")
+    assert stored is not None
     assert _stored_ttl(stored, "SOA") == 300
     assert _stored_ttl(stored, "URI") == 3600
     assert _stored_ttl(stored, "RRSIG", dns.rdatatype.SOA) == 300

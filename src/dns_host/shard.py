@@ -36,7 +36,7 @@ FNV_32_PRIME = 16777619
 
 _HEX2 = re.compile(r"[0-9a-f]{2}")
 _KEEP = {"catalogue.json", "catalog.json"}
-_SUFFIXES = (".axfr", ".json", ".zone", ".ixfr")
+_SUFFIXES = (".json", ".zone", ".ixfr")
 
 
 def canonical_zone(name: str) -> str:

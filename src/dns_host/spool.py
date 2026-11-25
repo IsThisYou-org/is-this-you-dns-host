@@ -1,20 +1,21 @@
 """Spool of validated zones between the API workers and the controller.
 
 The API creates an empty uniquely named file in the spool directory, writes
-the wire payload under ``spool/tmp`` with its own temporary name, then
+the zone document under ``spool/tmp`` with its own temporary name, then
 ``rename()``s that file over the empty one. Readers therefore see either an
-empty file or a complete one. JSON is not stored; the payload is wire-format
-AXFR data plus a short header the controller needs.
+empty file or a complete one. The body is the stored JSON document, not
+AXFR wire.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-MAGIC = b"DHAXFR1\n"
+MAGIC = b"DHZONE1\n"
 
 
 @dataclass
@@ -26,7 +27,7 @@ class SpoolJob:
     parent_zone: str
     soa: str
     soa_ttl: int
-    wire: bytes
+    document: dict
 
 
 def encode_job(
@@ -37,42 +38,44 @@ def encode_job(
     parent_zone: str,
     soa: str,
     soa_ttl: int,
-    wire: bytes,
+    document: dict,
 ) -> bytes:
-    header = "\n".join(
-        [
-            apex,
-            str(int(serial)),
-            str(int(expires_at)),
-            parent_zone,
-            str(int(soa_ttl)),
-            soa.replace("\n", " "),
-        ]
-    )
-    return MAGIC + header.encode("utf-8") + b"\n\n" + wire
+    payload = {
+        "apex": apex,
+        "serial": int(serial),
+        "expires_at": int(expires_at),
+        "parent_zone": parent_zone,
+        "soa": soa.replace("\n", " "),
+        "soa_ttl": int(soa_ttl),
+        "document": document,
+    }
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return MAGIC + body.encode("utf-8")
 
 
 def decode_job(path: Path, data: bytes) -> SpoolJob:
     if not data.startswith(MAGIC):
-        raise ValueError("spool file is not wire-format AXFR data")
-    rest = data[len(MAGIC) :]
-    marker = rest.find(b"\n\n")
-    if marker < 0:
-        raise ValueError("spool file header is truncated")
-    lines = rest[:marker].decode("utf-8").split("\n")
-    if len(lines) != 6:
-        raise ValueError("spool file header is incomplete")
-    apex, serial, expires_at, parent_zone, soa_ttl, soa = lines
-    return SpoolJob(
-        path=path,
-        apex=apex,
-        serial=int(serial),
-        expires_at=int(expires_at),
-        parent_zone=parent_zone,
-        soa=soa,
-        soa_ttl=int(soa_ttl),
-        wire=rest[marker + 2 :],
-    )
+        raise ValueError("spool file is not a zone document")
+    try:
+        payload = json.loads(data[len(MAGIC):].decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("spool file is not a zone document") from exc
+    document = payload.get("document")
+    if not isinstance(document, dict) or "rrsets" not in document:
+        raise ValueError("spool file document is incomplete")
+    try:
+        return SpoolJob(
+            path=path,
+            apex=str(payload["apex"]),
+            serial=int(payload["serial"]),
+            expires_at=int(payload["expires_at"]),
+            parent_zone=str(payload["parent_zone"]),
+            soa=str(payload["soa"]),
+            soa_ttl=int(payload["soa_ttl"]),
+            document=document,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("spool file header is incomplete") from exc
 
 
 def submit(spool_dir: Path, payload: bytes) -> Path:
@@ -81,7 +84,8 @@ def submit(spool_dir: Path, payload: bytes) -> Path:
     spool_dir.mkdir(parents=True, exist_ok=True)
     temporary_dir = spool_dir / "tmp"
     temporary_dir.mkdir(parents=True, exist_ok=True)
-    placeholder_fd, placeholder_name = tempfile.mkstemp(prefix="job", dir=spool_dir)
+    placeholder_fd, placeholder_name = tempfile.mkstemp(prefix="job",
+                                                        dir=spool_dir)
     os.close(placeholder_fd)
     data_fd, data_name = tempfile.mkstemp(prefix="data", dir=temporary_dir)
     try:

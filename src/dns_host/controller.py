@@ -2,38 +2,24 @@
 
 It polls the spool directory mtime, takes the oldest non-empty file, and
 ignores empty files, directories and hidden names. The SOA serial is checked
-again here: the API's check only fails fast. Zone bytes are installed with a
-temporary file and ``rename``. Zones whose signatures have been expired for
-more than the grace period are removed.
+again here: the API's check only fails fast. The spooled document is stored
+as the per-zone JSON file and as SQLite metadata. Zones whose signatures
+have been expired for more than the grace period are removed.
 """
 
 from __future__ import annotations
 
-import base64
 import os
 import time
 from pathlib import Path
-
-import dns.message
-import dns.rdatatype
 
 from dns_host.catalogfile import Catalog, Member
 from dns_host.config import data_dir
 from dns_host.logutil import log
 from dns_host.notifyplan import plan_notifies, send_plan
-from dns_host.shard import remove_zone_file, zone_file_name, zone_path
 from dns_host.spool import decode_job, pending
 from dns_host.wireaxfr import catalog_tcp_bytes
-
-
-def zone_wire_path(settings, apex: str) -> Path:
-    del settings
-    return zone_path(data_dir() / "zones", apex, zone_file_name(apex, ".axfr"))
-
-
-def discard_zone_wire(settings, apex: str) -> None:
-    del settings
-    remove_zone_file(data_dir() / "zones", apex, zone_file_name(apex, ".axfr"))
+from dns_host.zone import document_to_zone
 
 
 class Controller:
@@ -90,7 +76,6 @@ class Controller:
         had = apex in self.catalog.zones
         self.catalog.zones.pop(apex, None)
         sql_serial = self.store.delete_zone(apex, now)
-        discard_zone_wire(self.settings, apex)
         if not had and sql_serial is None:
             return None
         if had:
@@ -119,7 +104,7 @@ class Controller:
             )
             path.unlink(missing_ok=True)
             return False
-        self._install_wire(job.apex, job.wire)
+        self._remember_sqlite(job)
         self.catalog.zones[job.apex] = Member(
             apex=job.apex,
             serial=job.serial,
@@ -128,7 +113,6 @@ class Controller:
             expires_at=job.expires_at,
             parent_zone=job.parent_zone,
         )
-        self._remember_sqlite(job)
         path.unlink(missing_ok=True)
         log("info",
             "zone installed from spool",
@@ -136,23 +120,19 @@ class Controller:
             serial=job.serial)
         return True
 
-    def _install_wire(self, apex: str, wire: bytes) -> None:
-        destination = zone_wire_path(self.settings, apex)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
-        temporary.write_bytes(wire)
-        os.replace(temporary, destination)
-
     def _remember_sqlite(self, job) -> None:
-        document, min_expiry, max_expiry = _document_from_wire(
-            job.apex, job.wire)
-        if max_expiry <= 0:
-            max_expiry = job.expires_at
-            min_expiry = job.expires_at
+        import dns.name
+
+        zone = document_to_zone(dns.name.from_text(job.apex), job.document)
+        expiries = zone.rrsig_expiries()
+        if expiries:
+            min_expiry, max_expiry = min(expiries), max(expiries)
+        else:
+            min_expiry = max_expiry = job.expires_at
         self.store.replace_zone(
             apex=job.apex,
             serial=job.serial,
-            document=document,
+            document=job.document,
             now=self.settings.now(),
             rrsig_min_expiry=min_expiry,
             rrsig_max_expiry=max_expiry,
@@ -170,7 +150,6 @@ class Controller:
             return False
         for apex in removed:
             self.catalog.zones.pop(apex, None)
-            discard_zone_wire(self.settings, apex)
             self.store.delete_zone(apex, now)
             log("info",
                 "zone aged out",
@@ -189,64 +168,6 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
     temporary.write_bytes(data)
     os.replace(temporary, path)
-
-
-def _document_from_wire(apex: str, wire: bytes) -> tuple[dict, int, int]:
-    grouped: dict[tuple[str, str], dict] = {}
-    expiries: list[int] = []
-    offset = 0
-    seen_soa = False
-    while offset + 2 <= len(wire):
-        length = int.from_bytes(wire[offset:offset + 2], "big")
-        offset += 2
-        message = dns.message.from_wire(wire[offset:offset + length])
-        offset += length
-        for rrset in message.answer:
-            if int(rrset.rdtype) == int(dns.rdatatype.SOA):
-                if seen_soa:
-                    continue
-                seen_soa = True
-            type_name = dns.rdatatype.to_text(rrset.rdtype)
-            if int(rrset.rdtype) == int(dns.rdatatype.RRSIG):
-                pieces = {}
-                for rdata in rrset:
-                    pieces.setdefault(int(rdata.type_covered),
-                                      []).append(rdata)
-                    expiries.append(int(rdata.expiration))
-                encoded_groups = [((rrset.name.to_text(), type_name, covered),
-                                   rdatas, int(rrset.ttl))
-                                  for covered, rdatas in pieces.items()]
-            else:
-                encoded_groups = [((rrset.name.to_text(), type_name),
-                                   list(rrset), int(rrset.ttl))]
-            for key, rdatas, ttl in encoded_groups:
-                encoded = [
-                    base64.b64encode(rdata.to_wire()).decode("ascii")
-                    for rdata in rdatas
-                ]
-                bucket = grouped.get(key)
-                if bucket is None:
-                    grouped[key] = {
-                        "name": rrset.name.to_text(),
-                        "type": type_name,
-                        "ttl": ttl,
-                        "wire": encoded,
-                    }
-                    continue
-                if int(bucket["ttl"]) != ttl:
-                    raise ValueError(
-                        f"{rrset.name.to_text()} {type_name} has more than one TTL"
-                    )
-                for item in encoded:
-                    if item not in bucket["wire"]:
-                        bucket["wire"].append(item)
-    document = {
-        "apex": apex,
-        "rrsets": [grouped[key] for key in sorted(grouped)]
-    }
-    if not expiries:
-        return document, 0, 0
-    return document, min(expiries), max(expiries)
 
 
 def main() -> None:

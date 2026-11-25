@@ -43,12 +43,12 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 | Path | Contents |
 | --- | --- |
 | `/opt/data/etc/config.yaml` | Operator configuration. A missing file is empty configuration. |
-| `/opt/data/spool` | Validated AXFR payloads, one uniquely named job per upload. `tmp/` holds the file before `rename`. Not sharded. |
-| `/opt/data/zones` | Installed zone wire and JSON under `<hh>/<ll>/`. `catalogue.json` stays in this directory. |
+| `/opt/data/spool` | Validated zone documents, one uniquely named job per upload. `tmp/` holds the file before `rename`. Not sharded. |
+| `/opt/data/zones` | The zone body, one JSON file under `<hh>/<ll>/`. `catalogue.json` stays in this directory. |
 | `/opt/data/catalog` | Catalog file (zone names and full SOA records) and its mtime, which is the catalog SOA serial. One catalog, not sharded. |
 | `/opt/data/nsd` | Generated `nsd.conf`, TSIG control keys, transfer state. NSD's zone copies are `zones/<c1>/<c2>/<name>.zone`. |
 | `/opt/data/log` | Syslog output |
-| `/opt/data/host.db` | API state (admission, grace, counters). The DNS side does not serve from this file. |
+| `/opt/data/host.db` | Zone metadata, admission, grace, and counters. The zone body is the JSON file, not a row in this database. |
 | `/run`, `/tmp` | Symlinks to `/dev/shm`: pid files, the gunicorn control socket, the generated nginx config (`/run/nginx/nginx.conf`), nginx temp files. NSD remote-control is TCP `127.0.0.1:8952`, not a socket here. |
 
 ### Per-zone files
@@ -61,8 +61,7 @@ For `james.isthisyou.me` the FNV-1a 32-bit hash is `0x9d00b292`, the folded valu
 
 | Store | Path for `james.isthisyou.me` |
 | --- | --- |
-| Installed AXFR wire | `/opt/data/zones/2f/92/james.isthisyou.me.axfr` |
-| JSON copy of the zone document | `/opt/data/zones/2f/92/james.isthisyou.me.json` |
+| Zone document | `/opt/data/zones/2f/92/james.isthisyou.me.json` |
 | NSD member zonefile | `/opt/data/nsd/zones/j/a/james.isthisyou.me.zone` |
 | NSD catalog zonefile | `/opt/data/nsd/zones/catalog.zone` |
 
@@ -178,16 +177,16 @@ If none of the parent nameservers can be reached, admission fails with `parent_l
 
 The parent NS name set must equal the apex NS set. If the parent is missing a service NS the error is `parent_ns_incomplete` (403). Any other difference is `ns_set_mismatch` (422). The DS digest is compared to the uploaded KSK before any signature in the upload is verified. Signature verification is last.
 
-On success the API writes wire-format AXFR data into the spool (an empty `mktemp` file in `/opt/data/spool`, the bytes under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs the zone under the sharded path and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. NSD is not reloaded. It learns the new member from the catalog transfer.
+On success the API writes the validated zone document into the spool (an empty `mktemp` file in `/opt/data/spool`, the JSON under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs that document as the sharded JSON file, records metadata in SQLite, and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. NSD is not reloaded. It learns the new member from the catalog transfer. The AXFR service builds wire from the JSON file on each transfer.
 
 ## Processes
 
 | Process | How it runs | Role |
 | --- | --- | --- |
-| REST API | gunicorn, `GUNICORN_WORKERS` (default 3) | Admission and DNSSEC validation, unchanged. Caches DNSKEYs already validated to the ICANN or Handshake root. Spools wire, not JSON. |
+| REST API | gunicorn, `GUNICORN_WORKERS` (default 3) | Admission and DNSSEC validation, unchanged. Caches DNSKEYs already validated to the ICANN or Handshake root. Spools the zone document. |
 | Zone controller | one process | Polls the spool, ignores empty files, directories and hidden names, re-checks the SOA serial, installs the zone, ages out zones expired for more than 90 days. |
 | DNS UDP | one process | Reloads the catalog on mtime change, answers SOA from the catalog, sends NOTIFY for the catalog and for new or updated zones. |
-| DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Streams pre-built AXFR, including the catalog in RFC 9432 form. Each child refreshes the valid-zone list when the catalog file changes. |
+| DNS TCP | pre-fork, `axfr_children` (default 5) | `select` then `accept` on a non-blocking `127.0.0.1` socket. A failed accept is retried. Builds each user-zone AXFR from its JSON file. The catalog AXFR is the pre-built RFC 9432 payload. Each child refreshes the valid-zone list when the catalog file changes. |
 | NSD | one process | Public port 53. Configured with only the catalog zone (`catalog: consumer`). Member zones come from that catalog and are stored with `zonefile: "%1/%2/%s.zone"`. Writes those files every 60 seconds, loads them on restart, then checks SOA. Remote control listens on `127.0.0.1:8952`. |
 | cron | busybox `crond -S` | Every 15 minutes, deletes empty spool files and orphaned `tmp` files older than five minutes. Messages go to syslog. |
 

@@ -12,7 +12,6 @@ from dns_host.catalogfile import Catalog
 from dns_host.errors import ApiError
 from dns_host.logutil import log
 from dns_host.spool import encode_job, submit
-from dns_host.wireaxfr import tcp_bytes
 from dns_host.pipeline import (
     ds_matches,
     next_expire_hint,
@@ -88,7 +87,7 @@ def admit(body: dict, url_apex, settings, store, lookup, _notifier,
                 parent_zone=delegation.parent_zone.to_text(),
                 soa=soa.to_text(),
                 soa_ttl=int(soa_rrset.ttl) if soa_rrset is not None else 300,
-                wire=tcp_bytes(zone.axfr_rrsets()),
+                document=zone.to_document(),
             ),
         )
         store.remember_parent_day(

@@ -68,7 +68,10 @@ class Maintenance:
     def _recheck_parent(self, row, now: int) -> None:
         try:
             apex = normalise_name(row.apex)
-            zone = document_to_zone(apex, row.document)
+            zone = _zone_from_disk(row.apex)
+            if zone is None:
+                log("warning", "zone file missing", apex=row.apex)
+                return
             delegation = authenticate_parent(self.lookup, self.settings, apex)
             if _delegation_matches(zone, delegation, self.settings):
                 if row.parent_drift_since is not None or not row.parent_ok:
@@ -119,6 +122,15 @@ class Maintenance:
                 "catalog NOTIFY after drop failed",
                 apex=apex,
                 error=str(exc))
+
+
+def _zone_from_disk(apex: str):
+    from dns_host.zonesync import read_member
+
+    document = read_member(data_dir() / "zones", apex)
+    if document is None:
+        return None
+    return document_to_zone(normalise_name(apex), document)
 
 
 def _delegation_matches(zone, delegation, settings) -> bool:

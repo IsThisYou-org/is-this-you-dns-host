@@ -28,10 +28,10 @@ def test_fnv_vectors_and_james_shard():
     assert fnv1a_32(b"james.isthisyou.me") == 0x9D00B292
     assert fnv_16("james.isthisyou.me") == 0x2F92
     assert fnv_16("James.IsThisYou.Me.") == 0x2F92
-    filename = zone_file_name("james.isthisyou.me.", ".axfr")
-    assert filename == "james.isthisyou.me.axfr"
+    filename = zone_file_name("james.isthisyou.me.", ".json")
+    assert filename == "james.isthisyou.me.json"
     path = zone_path(Path("/opt/data/zones"), "james.isthisyou.me", filename)
-    assert path == Path("/opt/data/zones/2f/92/james.isthisyou.me.axfr")
+    assert path == Path("/opt/data/zones/2f/92/james.isthisyou.me.json")
 
 
 def test_render_nsd_lists_only_the_catalog_zone():
@@ -53,7 +53,7 @@ def test_migrate_flat_files_is_idempotent(tmp_path, capsys):
     zones = tmp_path / "zones"
     zones.mkdir()
     (zones / "james.isthisyou.me.axfr").write_bytes(b"wire")
-    (zones / "james.isthisyou.me.json").write_bytes(b"{\"apex\":1}")
+    (zones / "other.example.json").write_bytes(b"{\"apex\":1}")
     (zones / "catalogue.json").write_text("{}", encoding="utf-8")
     (zones / ".hidden.axfr").write_bytes(b"no")
     (zones / "notes.txt").write_bytes(b"no")
@@ -61,23 +61,21 @@ def test_migrate_flat_files_is_idempotent(tmp_path, capsys):
     (zones / "subdir").mkdir()
     (zones / "subdir" / "other.axfr").write_bytes(b"leave")
 
-    assert migrate_flat_zone_files(zones) == 2
-    axfr = zones / "2f" / "92" / "james.isthisyou.me.axfr"
-    document = zones / "2f" / "92" / "james.isthisyou.me.json"
-    assert axfr.read_bytes() == b"wire"
+    assert migrate_flat_zone_files(zones) == 1
+    document = zone_path(zones, "other.example", "other.example.json")
     assert document.read_bytes() == b'{"apex":1}'
-    assert not (zones / "james.isthisyou.me.axfr").exists()
+    assert (zones / "james.isthisyou.me.axfr").read_bytes() == b"wire"
     assert (zones / "catalogue.json").read_text(encoding="utf-8") == "{}"
     assert (zones / ".hidden.axfr").read_bytes() == b"no"
     assert (zones / "notes.txt").read_bytes() == b"no"
     assert (zones / "xfr.9").read_bytes() == b"temp"
     assert (zones / "subdir" / "other.axfr").read_bytes() == b"leave"
     logged = capsys.readouterr().out
-    assert logged.count("moved flat zone file") == 2
+    assert logged.count("moved flat zone file") == 1
 
     assert migrate_flat_zone_files(zones) == 0
     assert capsys.readouterr().out == ""
-    assert axfr.read_bytes() == b"wire"
+    assert document.read_bytes() == b'{"apex":1}'
 
 
 def test_migrate_keeps_matching_shard_and_leaves_a_conflict(tmp_path, capsys):
@@ -85,10 +83,10 @@ def test_migrate_keeps_matching_shard_and_leaves_a_conflict(tmp_path, capsys):
     zones = tmp_path / "zones"
     dest = zones / "2f" / "92"
     dest.mkdir(parents=True)
-    (dest / "james.isthisyou.me.axfr").write_bytes(b"wire")
-    (zones / "james.isthisyou.me.axfr").write_bytes(b"wire")
+    (dest / "james.isthisyou.me.json").write_bytes(b"wire")
+    (zones / "james.isthisyou.me.json").write_bytes(b"wire")
     assert migrate_flat_zone_files(zones) == 1
-    assert not (zones / "james.isthisyou.me.axfr").exists()
+    assert not (zones / "james.isthisyou.me.json").exists()
     assert "removed flat zone file already in shard" in capsys.readouterr().out
 
     (zones / "james.isthisyou.me.json").write_bytes(b"new")
@@ -120,7 +118,7 @@ def test_old_nsd_hash_copies_are_deleted(tmp_path, capsys):
 
 def test_migrate_data_dirs_shards_zones_and_drops_nsd_hash_copies(tmp_path):
     (tmp_path / "zones").mkdir()
-    (tmp_path / "zones" / "user.example.axfr").write_bytes(b"a")
+    (tmp_path / "zones" / "user.example.json").write_bytes(b"a")
     nsd_zones = tmp_path / "nsd" / "zones"
     old = nsd_zones / "c6" / "3c"
     old.mkdir(parents=True)
@@ -130,14 +128,15 @@ def test_migrate_data_dirs_shards_zones_and_drops_nsd_hash_copies(tmp_path):
     (xfr / "user.example.axfr").write_bytes(b"c")
     assert migrate_data_dirs(tmp_path) == 2
     assert (tmp_path / "zones" / "c6" / "3c" /
-            "user.example.axfr").read_bytes() == b"a"
+            "user.example.json").read_bytes() == b"a"
     assert not (nsd_zones / "c6").exists()
     assert (xfr / "user.example.axfr").read_bytes() == b"c"
     assert migrate_data_dirs(tmp_path) == 0
 
 
 def test_controller_install_and_delete_use_the_shard(tmp_path, monkeypatch):
-    from dns_host.controller import Controller, zone_wire_path
+    from dns_host.controller import Controller
+    from dns_host.shard import zone_file_name
     from dns_host.spool import submit
     from tests.test_architecture import _job, _settings, _store
 
@@ -153,20 +152,15 @@ def test_controller_install_and_delete_use_the_shard(tmp_path, monkeypatch):
              serial=10,
              expires_at=1_700_000_000 + 86400))
     controller.run_once()
-    path = zone_wire_path(settings, "James.IsThisYou.Me.")
-    assert path == tmp_path / "zones" / "2f" / "92" / "james.isthisyou.me.axfr"
+    path = zone_path(tmp_path / "zones", "James.IsThisYou.Me.",
+                     zone_file_name("James.IsThisYou.Me.", ".json"))
+    assert path == tmp_path / "zones" / "2f" / "92" / "james.isthisyou.me.json"
     assert path.is_file()
     assert not (tmp_path / "zones" / "james.isthisyou.me.axfr").exists()
-    document = tmp_path / "zones" / "2f" / "92" / "james.isthisyou.me.json"
-    assert document.is_file()
     assert not (tmp_path / "nsd" / "nsd.conf").exists()
 
-    flat = tmp_path / "zones" / "james.isthisyou.me.axfr"
-    flat.write_bytes(b"stale")
     controller.remove("james.isthisyou.me.", settings.now())
     assert not path.exists()
-    assert not flat.exists()
-    assert not document.exists()
 
 
 def test_readme_and_cron_document_the_layout():

@@ -6,9 +6,10 @@ children (default 5). Each child ``select``s the listening socket and then
 ``accept``s; a failed accept means a sibling took the connection, and the
 child loops. Dead children are replaced.
 
-AXFR bytes for user zones were built by the API. The catalog AXFR is the
-RFC 9432 payload written by the controller. Children reload the catalog when
-its mtime changes so the list of valid zones stays current.
+User-zone AXFR is built from the stored JSON file on each transfer. The
+catalog AXFR is the RFC 9432 payload written by the controller. Children
+reload the catalog when its mtime changes so the list of valid zones stays
+current. There is no wire cache.
 """
 
 from __future__ import annotations
@@ -59,13 +60,17 @@ class CatalogView:
 
             return catalog_tcp_bytes(self.settings, self.catalog.serial,
                                      self.catalog.member_names())
-        from dns_host.controller import zone_wire_path
+        from dns_host.wireaxfr import tcp_bytes
+        from dns_host.zone import document_to_zone
+        from dns_host.zonesync import read_member
 
-        path = zone_wire_path(self.settings, apex)
-        try:
-            return path.read_bytes()
-        except OSError:
+        import dns.name
+
+        document = read_member(data_dir() / "zones", apex)
+        if document is None:
             return None
+        zone = document_to_zone(dns.name.from_text(apex), document)
+        return tcp_bytes(zone.axfr_rrsets())
 
 
 def bind_listener(settings) -> socket.socket:
