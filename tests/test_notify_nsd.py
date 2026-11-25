@@ -97,6 +97,67 @@ def test_every_catalog_serial_change_is_notified(settings, clock):
     assert catalog_sent == serials
 
 
+def test_notify_is_held_until_the_axfr_listener_accepts(settings, clock, capsys):
+    """A closed AXFR port leaves the NOTIFY due. It is not a failed send."""
+
+    _write_catalog(settings, [], clock.t)
+    sent = []
+
+    class Holding(Recorder):
+
+        def master_ready(self):
+            return self.ok
+
+        def notify(self, zone, soa):
+            sent.append((zone, int(next(iter(soa)).serial)))
+            return True
+
+    holder = Holding(ok=False)
+    service = _service(settings, holder)
+    clock.t += 1
+    after = _write_catalog(settings, [_member("a.example.", 1)], clock.t)
+    service._refresh_and_notify()
+    service.flush_notifies(now=10)
+    assert sent == []
+    catalog = settings.catalog_zone.to_text()
+    soa, attempts, due = service._pending[catalog]
+    assert attempts == 0
+    assert due <= 10
+    assert int(next(iter(soa)).serial) == after.serial
+    assert "a.example." in service._pending
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["msg"] for row in lines] == [
+        "waiting for the AXFR listener before NOTIFY"
+    ]
+    assert lines[0]["bind"] == "127.0.0.1"
+    assert lines[0]["port"] == 5353
+    service.flush_notifies(now=10)
+    assert sent == []
+    assert capsys.readouterr().out == ""
+    holder.ok = True
+    service.flush_notifies(now=10)
+    assert sent == [(catalog, after.serial), ("a.example.", 1)]
+    assert service._pending == {}
+
+
+def test_axfr_listener_open_follows_the_accepting_socket():
+    import socket
+
+    from dns_host.config import DNS_BIND, DNS_PORT
+    from dns_host.notify import axfr_listener_open
+
+    assert axfr_listener_open(timeout=0.2) is False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((DNS_BIND, DNS_PORT))
+    sock.listen(1)
+    try:
+        assert axfr_listener_open(timeout=0.2) is True
+    finally:
+        sock.close()
+    assert axfr_listener_open(timeout=0.2) is False
+
+
 def test_unacknowledged_notify_is_retried_with_backoff(settings, clock):
     _write_catalog(settings, [], clock.t)
     recorder = Recorder(ok=False)
