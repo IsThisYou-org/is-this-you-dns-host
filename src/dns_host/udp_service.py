@@ -2,8 +2,10 @@
 
 SOA answers for the catalog and for member zones come from the catalog file.
 Zone files are not read. The catalog SOA serial is the catalog file's mtime.
-The file is polled; NOTIFY is sent for the catalog and for new or updated
-members when it changes.
+The file is polled; NOTIFY is sent to the local NSD for the catalog and for
+new or updated members when it changes. At start-up, once the catalog has
+loaded, the catalog alone is notified, because NSD may hold an old catalog
+from before a restart. A NOTIFY that NSD does not acknowledge is retried with backoff.
 """
 
 from __future__ import annotations
@@ -25,7 +27,9 @@ from dns_host.catalogfile import Catalog
 from dns_host.config import DNS_BIND, DNS_PORT
 from dns_host.logutil import log
 from dns_host.notify import UdpNotifier
-from dns_host.notifyplan import plan_notifies, send_plan
+from dns_host.notifyplan import plan_notifies
+
+NOTIFY_RETRY_MAX_SECONDS = 60
 
 
 class UdpService:
@@ -39,10 +43,21 @@ class UdpService:
         self._sock: socket.socket | None = None
         self.port = DNS_PORT
         self._snapshot = (0, ())
+        # zone -> (soa, attempts, next attempt time). Insertion order keeps
+        # the catalog ahead of its members.
+        self._pending: dict[str, tuple] = {}
+        self._pending_lock = threading.Lock()
 
     def start(self) -> int:
-        self.catalog.load()
+        # Load first, then bind: nothing listens until the real catalog
+        # has been read, so an empty catalog can never be served.
+        wait_for_catalog(self.catalog)
         self._snapshot = self.catalog.snapshot()
+        # Start-up: NOTIFY the catalog only. NSD then checks the catalog
+        # SOA and transfers it if it is behind. Members are notified when
+        # they change.
+        self._queue([(self.settings.catalog_zone.to_text(),
+                      catalog_soa(self.settings, self.catalog.serial))])
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((DNS_BIND, DNS_PORT))
@@ -50,6 +65,11 @@ class UdpService:
         sock.settimeout(0.5)
         self._sock = sock
         threading.Thread(target=self._loop, name="dns-udp",
+                         daemon=True).start()
+        # NOTIFY has its own thread so a slow or absent NSD never delays
+        # SOA answers.
+        threading.Thread(target=self._notify_loop,
+                         name="dns-notify",
                          daemon=True).start()
         log("info", "DNS UDP service started", port=self.port, bind=DNS_BIND)
         return self.port
@@ -86,14 +106,52 @@ class UdpService:
     def _refresh_and_notify(self) -> None:
         previous_ns = self.catalog.mtime_ns
         self.catalog.load()
+        if not self.catalog.loaded:
+            log("error",
+                "catalog file disappeared",
+                path=str(self.catalog.path))
+            return
         if self.catalog.mtime_ns == previous_ns:
             return
         current = self.catalog.snapshot()
         if current != self._snapshot:
-            send_plan(
-                self.notifier,
+            self._queue(
                 plan_notifies(self.settings, self._snapshot, self.catalog))
             self._snapshot = current
+
+    def _notify_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.flush_notifies()
+            except Exception as exc:
+                log("error", "NOTIFY loop failed", error=repr(exc))
+            self._stop.wait(0.5)
+
+    def _queue(self, messages) -> None:
+        with self._pending_lock:
+            for zone, soa in messages:
+                # A newer SOA for the same zone replaces the queued one.
+                self._pending.pop(zone, None)
+                self._pending[zone] = (soa, 0, 0.0)
+
+    def flush_notifies(self, now: float | None = None) -> None:
+        """Send due NOTIFYs. Unacknowledged ones back off up to a minute."""
+
+        now = time.monotonic() if now is None else now
+        with self._pending_lock:
+            due_now = [(zone, item) for zone, item in self._pending.items()
+                       if item[2] <= now]
+        for zone, (soa, attempts, _due) in due_now:
+            ok = self.notifier.notify(zone, soa)
+            with self._pending_lock:
+                if self._pending.get(zone, (None, ))[0] is not soa:
+                    continue  # replaced by a newer SOA meanwhile
+                if ok:
+                    del self._pending[zone]
+                    continue
+                attempts += 1
+                delay = min(NOTIFY_RETRY_MAX_SECONDS, 2**attempts)
+                self._pending[zone] = (soa, attempts, now + delay)
 
     def _handle(self, data: bytes) -> bytes | None:
         self._refresh_and_notify()
@@ -133,6 +191,26 @@ class UdpService:
         return dns.rrset.from_text(text,
                                    int(member.ttl) or 300, "IN", "SOA",
                                    member.soa)
+
+
+def wait_for_catalog(catalog, interval: float = 0.5) -> None:
+    """Block until the controller has written the catalog file."""
+
+    logged = False
+    while True:
+        catalog.load()
+        if catalog.loaded:
+            log("info",
+                "catalog loaded",
+                serial=catalog.serial,
+                members=len(catalog.zones))
+            return
+        if not logged:
+            log("warning",
+                "waiting for the catalog file before listening",
+                path=str(catalog.path))
+            logged = True
+        time.sleep(interval)
 
 
 class _NullStore:

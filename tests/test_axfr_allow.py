@@ -140,11 +140,13 @@ def test_allowed_axfr_ips_matches_secondary_hosts_and_subnets():
     assert "2001:db8::1" not in everyone.allowed_axfr_ips
 
 
-def test_notify_targets_stay_on_the_secondary_list(monkeypatch):
+def test_notify_goes_to_local_nsd_only(monkeypatch):
+    """NSD NOTIFYs the secondaries itself; axfr_allow is never notified."""
+
     calls = []
 
-    def fake_udp(query, host, timeout=2, port=53, **_kwargs):
-        calls.append((host, port))
+    def fake_udp(query, host, timeout=2, port=53, **kwargs):
+        calls.append((host, port, kwargs.get("source")))
         return dns.message.make_response(query)
 
     monkeypatch.setattr("dns.query.udp", fake_udp)
@@ -159,7 +161,7 @@ def test_notify_targets_stay_on_the_secondary_list(monkeypatch):
             return None
 
     UdpNotifier(settings, Counter()).notify("user.example.", None)
-    assert calls == [("192.0.2.10", 5353)]
+    assert calls == [("127.0.0.1", 53, "127.0.0.1")]
 
 
 def test_sample_configs_ship_an_empty_axfr_allow():

@@ -45,6 +45,12 @@ class Catalog:
     def wire_path(self) -> Path:
         return self.path.with_suffix(".axfr")
 
+    @property
+    def loaded(self) -> bool:
+        """True once a real catalog file has been read."""
+
+        return self.mtime_ns is not None
+
     def has(self, apex: str) -> bool:
         return apex in self.zones
 
