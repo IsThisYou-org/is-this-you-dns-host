@@ -146,11 +146,8 @@ def _store(settings):
 
 def _job(apex: str, serial: int, expires_at: int | None = None) -> bytes:
     from dns_host.spool import encode_job
-    from dns_host.wireaxfr import tcp_bytes
-    import dns.rrset
 
     soa = f"ns1.example.net. hostmaster.{apex} {serial} 3600 600 864000 300"
-    rr = dns.rrset.from_text(apex, 300, "IN", "SOA", soa)
     return encode_job(
         apex=apex,
         serial=serial,
@@ -158,5 +155,8 @@ def _job(apex: str, serial: int, expires_at: int | None = None) -> bytes:
         parent_zone="example.",
         soa=soa,
         soa_ttl=300,
-        wire=tcp_bytes([rr]),
+        document={
+            "apex": apex,
+            "rrsets": []
+        },
     )

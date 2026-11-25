@@ -43,6 +43,15 @@ def write_member(directory: Path, apex: str, document: dict) -> None:
     )
 
 
+def read_member(directory: Path, apex: str) -> dict | None:
+    """The on-disk zone document, or ``None`` when the file is absent."""
+
+    path = member_path(directory, apex)
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def write_catalogue(directory: Path, catalog_serial: int,
                     zones: list[dict]) -> None:
     payload = {

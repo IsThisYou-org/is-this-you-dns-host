@@ -5,18 +5,15 @@ Replacing a zone and updating the catalog happen in one transaction.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS zones (
     apex TEXT PRIMARY KEY,
     serial INTEGER NOT NULL,
-    document TEXT NOT NULL,
     admitted_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     rrsig_min_expiry INTEGER NOT NULL,
@@ -54,12 +51,15 @@ CREATE TABLE IF NOT EXISTS parent_apex_day (
 );
 """
 
+_ZONE_SQL = """SELECT apex, serial, admitted_at, updated_at,
+    rrsig_min_expiry, rrsig_max_expiry, last_parent_check, parent_ok,
+    parent_drift_since, parent_zone FROM zones"""
+
 
 @dataclass
 class ZoneRow:
     apex: str
     serial: int
-    document: dict
     admitted_at: int
     updated_at: int
     rrsig_min_expiry: int
@@ -79,6 +79,7 @@ class CachedFailure:
 
 
 class Store:
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,9 +116,11 @@ class Store:
 
     def ensure_catalog(self, now: int) -> int:
         with self.transaction() as conn:
-            row = conn.execute("SELECT serial FROM catalog WHERE id = 1").fetchone()
+            row = conn.execute(
+                "SELECT serial FROM catalog WHERE id = 1").fetchone()
             if row is None:
-                conn.execute("INSERT INTO catalog (id, serial) VALUES (1, ?)", (now,))
+                conn.execute("INSERT INTO catalog (id, serial) VALUES (1, ?)",
+                             (now, ))
                 serial = now
             else:
                 serial = int(row["serial"])
@@ -126,7 +129,8 @@ class Store:
 
     def catalog_serial(self) -> int:
         with self._read() as conn:
-            row = conn.execute("SELECT serial FROM catalog WHERE id = 1").fetchone()
+            row = conn.execute(
+                "SELECT serial FROM catalog WHERE id = 1").fetchone()
             return int(row["serial"]) if row else 0
 
     def _row(self, row: sqlite3.Row | None) -> ZoneRow | None:
@@ -135,7 +139,6 @@ class Store:
         return ZoneRow(
             apex=row["apex"],
             serial=int(row["serial"]),
-            document=json.loads(row["document"]),
             admitted_at=int(row["admitted_at"]),
             updated_at=int(row["updated_at"]),
             rrsig_min_expiry=int(row["rrsig_min_expiry"]),
@@ -148,17 +151,21 @@ class Store:
 
     def get_zone(self, apex: str) -> ZoneRow | None:
         with self._read() as conn:
-            row = conn.execute("SELECT * FROM zones WHERE apex = ?", (apex,)).fetchone()
+            row = conn.execute(_ZONE_SQL + " WHERE apex = ?",
+                               (apex, )).fetchone()
         return self._row(row)
 
     def list_zones(self) -> list[ZoneRow]:
+        """Metadata only. Zone bodies live in the per-zone JSON files."""
+
         with self._read() as conn:
-            rows = conn.execute("SELECT * FROM zones ORDER BY apex").fetchall()
+            rows = conn.execute(_ZONE_SQL + " ORDER BY apex").fetchall()
         return [self._row(row) for row in rows]
 
     def list_members(self) -> list[str]:
         with self._read() as conn:
-            rows = conn.execute("SELECT apex FROM zones ORDER BY apex").fetchall()
+            rows = conn.execute(
+                "SELECT apex FROM zones ORDER BY apex").fetchall()
         return [row["apex"] for row in rows]
 
     def replace_zone(
@@ -180,9 +187,8 @@ class Store:
         from dns_host.errors import ApiError
 
         with self.transaction() as conn:
-            current = conn.execute(
-                "SELECT serial FROM zones WHERE apex = ?", (apex,)
-            ).fetchone()
+            current = conn.execute("SELECT serial FROM zones WHERE apex = ?",
+                                   (apex, )).fetchone()
             if current is not None and serial <= int(current["serial"]):
                 raise ApiError(
                     409,
@@ -190,18 +196,16 @@ class Store:
                     f"SOA serial {serial} is not greater than the stored serial {current['serial']}",
                 )
             is_new = current is None
-            payload = json.dumps(document, separators=(",", ":"))
             if is_new:
                 conn.execute(
                     """INSERT INTO zones (
-                        apex, serial, document, admitted_at, updated_at,
+                        apex, serial, admitted_at, updated_at,
                         rrsig_min_expiry, rrsig_max_expiry, last_parent_check,
                         parent_ok, parent_drift_since, parent_zone
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)""",
                     (
                         apex,
                         serial,
-                        payload,
                         now,
                         now,
                         rrsig_min_expiry,
@@ -213,14 +217,13 @@ class Store:
             else:
                 conn.execute(
                     """UPDATE zones SET
-                        serial = ?, document = ?, updated_at = ?,
+                        serial = ?, updated_at = ?,
                         rrsig_min_expiry = ?, rrsig_max_expiry = ?,
                         last_parent_check = ?, parent_ok = 1,
                         parent_drift_since = NULL, parent_zone = ?
                        WHERE apex = ?""",
                     (
                         serial,
-                        payload,
                         now,
                         rrsig_min_expiry,
                         rrsig_max_expiry,
@@ -229,13 +232,20 @@ class Store:
                         apex,
                     ),
                 )
-            catalog_serial = self._bump_catalog(conn, now) if is_new else self._catalog_serial(conn)
+            # The file is the zone body. Write it before the metadata commits
+            # so a failed transaction does not advertise a zone with no file.
+            from dns_host.zonesync import write_member
+
+            write_member(self.zones_directory(), apex, document)
+            catalog_serial = self._bump_catalog(
+                conn, now) if is_new else self._catalog_serial(conn)
             result = (is_new, catalog_serial)
-        self.publish_member(apex, document)
+        self._write_catalogue()
         return result
 
     def _catalog_serial(self, conn: sqlite3.Connection) -> int:
-        row = conn.execute("SELECT serial FROM catalog WHERE id = 1").fetchone()
+        row = conn.execute(
+            "SELECT serial FROM catalog WHERE id = 1").fetchone()
         if row is None:
             raise RuntimeError("catalog serial missing")
         return int(row["serial"])
@@ -245,7 +255,7 @@ class Store:
         serial = max(current + 1, now)
         if serial == current:
             serial = current + 1
-        conn.execute("UPDATE catalog SET serial = ? WHERE id = 1", (serial,))
+        conn.execute("UPDATE catalog SET serial = ? WHERE id = 1", (serial, ))
         return serial
 
     def set_parent_state(
@@ -267,7 +277,8 @@ class Store:
         """Remove a member and bump the catalog. Returns the new catalog serial."""
 
         with self.transaction() as conn:
-            deleted = conn.execute("DELETE FROM zones WHERE apex = ?", (apex,)).rowcount
+            deleted = conn.execute("DELETE FROM zones WHERE apex = ?",
+                                   (apex, )).rowcount
             if not deleted:
                 serial = None
             else:
@@ -277,13 +288,14 @@ class Store:
         self.unpublish_member(apex)
         return serial
 
-    def allow_rate(self, bucket: str, limit: int, window: int, now: int) -> bool:
+    def allow_rate(self, bucket: str, limit: int, window: int,
+                   now: int) -> bool:
         if limit <= 0:
             return True
         with self.transaction() as conn:
             row = conn.execute(
                 "SELECT window_start, count FROM rate_limit WHERE bucket = ?",
-                (bucket,),
+                (bucket, ),
             ).fetchone()
             if row is None or now >= int(row["window_start"]) + window:
                 conn.execute(
@@ -297,15 +309,14 @@ class Store:
                 return False
             conn.execute(
                 "UPDATE rate_limit SET count = count + 1 WHERE bucket = ?",
-                (bucket,),
+                (bucket, ),
             )
             return True
 
     def negative_get(self, apex: str, now: int) -> CachedFailure | None:
         with self._read() as conn:
-            row = conn.execute(
-                "SELECT * FROM negative_cache WHERE apex = ?", (apex,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM negative_cache WHERE apex = ?",
+                               (apex, )).fetchone()
         if row is None or int(row["expires_at"]) <= now:
             return None
         return CachedFailure(
@@ -315,9 +326,8 @@ class Store:
             expires_at=int(row["expires_at"]),
         )
 
-    def negative_put(
-        self, apex: str, reason: str, http_status: int, message: str, expires_at: int
-    ) -> None:
+    def negative_put(self, apex: str, reason: str, http_status: int,
+                     message: str, expires_at: int) -> None:
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO negative_cache (apex, reason, http_status, message, expires_at)
@@ -347,7 +357,8 @@ class Store:
             ).fetchone()
         return row is not None
 
-    def remember_parent_day(self, parent_zone: str, apex: str, day: str) -> None:
+    def remember_parent_day(self, parent_zone: str, apex: str,
+                            day: str) -> None:
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO parent_apex_day (parent_zone, apex, day)
@@ -366,48 +377,51 @@ class Store:
 
     def counter(self, name: str) -> int:
         with self._read() as conn:
-            row = conn.execute(
-                "SELECT value FROM counters WHERE name = ?", (name,)
-            ).fetchone()
+            row = conn.execute("SELECT value FROM counters WHERE name = ?",
+                               (name, )).fetchone()
         return int(row["value"]) if row else 0
 
     def zones_directory(self) -> Path:
         return self.path.parent / "zones"
 
-    def publish_member(self, apex: str, document: dict) -> None:
-        from dns_host.zonesync import write_catalogue, write_member
+    def _write_catalogue(self) -> None:
+        from dns_host.zonesync import write_catalogue
 
-        directory = self.zones_directory()
-        write_member(directory, apex, document)
-        write_catalogue(directory, self.catalog_serial(), self._catalogue_members())
+        write_catalogue(self.zones_directory(), self.catalog_serial(),
+                        self._catalogue_members())
 
     def unpublish_member(self, apex: str) -> None:
         from dns_host.shard import remove_zone_file
-        from dns_host.zonesync import write_catalogue, zone_filename
+        from dns_host.zonesync import zone_filename
 
-        directory = self.zones_directory()
-        write_catalogue(directory, self.catalog_serial(), self._catalogue_members())
-        remove_zone_file(directory, apex, zone_filename(apex))
+        self._write_catalogue()
+        remove_zone_file(self.zones_directory(), apex, zone_filename(apex))
 
     def republish_all(self) -> None:
+        """Drop JSON files for zones that are gone, and refresh catalogue.json.
+
+        The per-zone files are the zone bodies. This does not rewrite them
+        from the database.
+        """
+
         from dns_host.shard import iter_zone_files, migrate_flat_zone_files
-        from dns_host.zonesync import write_catalogue, write_member, zone_filename
+        from dns_host.zonesync import zone_filename
 
         directory = self.zones_directory()
         migrate_flat_zone_files(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        keep: set[str] = set()
-        for row in self.list_zones():
-            write_member(directory, row.apex, row.document)
-            keep.add(zone_filename(row.apex))
+        keep = {zone_filename(row.apex) for row in self.list_zones()}
         for path in iter_zone_files(directory, ".json"):
             if path.name == "catalogue.json" or path.name in keep:
                 continue
             path.unlink()
-        write_catalogue(directory, self.catalog_serial(), self._catalogue_members())
+        self._write_catalogue()
 
     def _catalogue_members(self) -> list[dict]:
-        return [{"apex": row.apex, "serial": row.serial} for row in self.list_zones()]
+        return [{
+            "apex": row.apex,
+            "serial": row.serial
+        } for row in self.list_zones()]
 
     def zones_in_grace(self, now: int) -> int:
         with self._read() as conn:
@@ -415,6 +429,6 @@ class Store:
                 """SELECT COUNT(*) AS n FROM zones
                    WHERE parent_drift_since IS NOT NULL
                       OR rrsig_max_expiry < ?""",
-                (now,),
+                (now, ),
             ).fetchone()
         return int(row["n"])
