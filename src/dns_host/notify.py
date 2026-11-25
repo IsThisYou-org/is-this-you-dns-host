@@ -1,7 +1,8 @@
 """NOTIFY (RFC 1996) to the local NSD.
 
-Failures are logged at error level and retried by the UDP service. They do
-not fail an upload that has already been stored.
+A failed attempt that will be retried is logged at info, with the attempt
+number. When that NOTIFY will not be tried again, one warning is logged.
+A failure does not fail an upload that has already been stored.
 """
 
 from __future__ import annotations
@@ -25,7 +26,12 @@ NOTIFY_TIMEOUT_SECONDS = 1
 
 class Notifier:
 
-    def notify(self, zone: str, soa) -> bool:
+    def notify(self,
+               zone: str,
+               soa,
+               *,
+               attempt: int = 1,
+               will_retry: bool = False) -> bool:
         raise NotImplementedError
 
     def master_ready(self) -> bool:
@@ -39,7 +45,12 @@ class RecordingNotifier(Notifier):
     def __init__(self):
         self.zones: list[str] = []
 
-    def notify(self, zone: str, soa) -> bool:
+    def notify(self,
+               zone: str,
+               soa,
+               *,
+               attempt: int = 1,
+               will_retry: bool = False) -> bool:
         self.zones.append(zone)
         return True
 
@@ -69,8 +80,18 @@ class UdpNotifier(Notifier):
 
         return axfr_listener_open()
 
-    def notify(self, zone: str, soa) -> bool:
-        """Send one NOTIFY. True when NSD answered NOERROR."""
+    def notify(self,
+               zone: str,
+               soa,
+               *,
+               attempt: int = 1,
+               will_retry: bool = False) -> bool:
+        """Send one NOTIFY. True when NSD answered NOERROR.
+
+        ``attempt`` is the 1-based try. When ``will_retry`` is true, a
+        failure is logged at info because another try will follow. When it
+        is false, the retries are finished and the failure is one warning.
+        """
 
         query = dns.message.make_query(zone, dns.rdatatype.SOA)
         query.set_opcode(dns.opcode.NOTIFY)
@@ -87,12 +108,8 @@ class UdpNotifier(Notifier):
                                      timeout=NOTIFY_TIMEOUT_SECONDS)
         except Exception as exc:
             self.store.incr("notify_fail")
-            log("error",
-                "NOTIFY failed",
-                apex=zone,
-                serial=serial,
-                target=f"{host}@{port}",
-                error=repr(exc))
+            self._log_failure(zone, serial, f"{host}@{port}", exc, attempt,
+                              will_retry)
             return False
         rcode = dns.rcode.to_text(response.rcode())
         if response.rcode() != dns.rcode.NOERROR:
@@ -112,6 +129,27 @@ class UdpNotifier(Notifier):
             target=f"{host}@{port}",
             rcode=rcode)
         return True
+
+    def _log_failure(self, zone: str, serial, target: str, exc: Exception,
+                     attempt: int, will_retry: bool) -> None:
+        """Log one failed send. A retry stays at info; the last try warns."""
+
+        if will_retry:
+            log("info",
+                "NOTIFY failed",
+                apex=zone,
+                serial=serial,
+                target=target,
+                error=repr(exc),
+                attempt=attempt)
+            return
+        log("warning",
+            "NOTIFY failed",
+            apex=zone,
+            serial=serial,
+            target=target,
+            attempts=attempt,
+            error=repr(exc))
 
 
 def axfr_listener_open(timeout: float = 0.2) -> bool:

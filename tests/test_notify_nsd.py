@@ -27,7 +27,7 @@ class Recorder:
         self.ok = ok
         self.sent = []
 
-    def notify(self, zone, soa):
+    def notify(self, zone, soa, **_extra):
         self.sent.append((zone, int(next(iter(soa)).serial)))
         return self.ok
 
@@ -111,7 +111,7 @@ def test_notify_is_held_until_the_axfr_listener_accepts(
         def master_ready(self):
             return self.ok
 
-        def notify(self, zone, soa):
+        def notify(self, zone, soa, **_extra):
             sent.append((zone, int(next(iter(soa)).serial)))
             return True
 
@@ -180,7 +180,10 @@ def test_unacknowledged_notify_is_retried_with_backoff(settings, clock):
     assert service._pending == {}
 
 
-def test_notify_is_logged_and_failure_is_error(settings, monkeypatch, capsys):
+def test_notify_is_logged_and_a_final_failure_is_a_warning(
+        settings, monkeypatch, capsys):
+    """A send that will not be retried is logged once at warning."""
+
     soa = catalog_rrsets(settings, 5, [])[0]
 
     def answered(query, host, port=53, source=None, timeout=1):
@@ -208,10 +211,101 @@ def test_notify_is_logged_and_failure_is_error(settings, monkeypatch, capsys):
     assert [(r["level"], r["msg"]) for r in lines] == [
         ("info", "NOTIFY sent"),
         ("error", "NOTIFY rejected"),
-        ("error", "NOTIFY failed"),
+        ("warning", "NOTIFY failed"),
     ]
     assert all(r["serial"] == 5 for r in lines)
     assert lines[0]["target"] == "127.0.0.1@53"
+    assert "attempt" not in lines[0]
+    failed = lines[2]
+    assert failed["apex"] == "catalog.svc.test."
+    assert failed["target"] == "127.0.0.1@53"
+    assert failed["attempts"] == 1
+    assert failed["error"] == "ConnectionRefusedError('nsd is not listening')"
+    assert "attempt" not in failed
+
+
+def test_notify_failure_is_warning_only_after_retries_run_out(
+        settings, monkeypatch, capsys):
+    """The warning names the apex, serial, target, attempts and last error."""
+
+    soa = catalog_rrsets(settings, 5, [])[0]
+
+    def down(*_args, **_kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("dns.query.udp", down)
+    notifier = UdpNotifier(settings, Counter())
+    assert notifier.notify("catalog.svc.test.",
+                           soa,
+                           attempt=4,
+                           will_retry=False) is False
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(lines) == 1
+    row = lines[0]
+    assert row["level"] == "warning"
+    assert row["msg"] == "NOTIFY failed"
+    assert row["apex"] == "catalog.svc.test."
+    assert row["serial"] == 5
+    assert row["target"] == "127.0.0.1@53"
+    assert row["attempts"] == 4
+    assert row["error"] == "TimeoutError('timed out')"
+    assert "attempt" not in row
+    assert notifier.store.counts["notify_fail"] == 1
+
+
+def test_retried_notify_failure_is_info_and_backoff_is_unchanged(
+        settings, monkeypatch, capsys):
+    """Each try that will be sent again is info, with the same backoff."""
+
+    monkeypatch.setattr(UdpNotifier, "master_ready", lambda self: True)
+
+    def down(*_args, **_kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("dns.query.udp", down)
+    store = Counter()
+    notifier = UdpNotifier(settings, store)
+    service = UdpService(settings, notifier=notifier)
+    zone = "catalog.svc.test."
+    soa = catalog_rrsets(settings, 5, [])[0]
+    service._queue([(zone, soa)])
+
+    now = 0.0
+    dues = []
+    for _ in range(6):
+        service.flush_notifies(now=now)
+        _soa, attempts, due = service._pending[zone]
+        dues.append((attempts, due))
+        now = due
+    assert dues == [(1, 2), (2, 6), (3, 14), (4, 30), (5, 62), (6, 122)]
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(lines) == 6
+    for number, row in enumerate(lines, start=1):
+        assert row["level"] == "info"
+        assert row["msg"] == "NOTIFY failed"
+        assert row["apex"] == zone
+        assert row["serial"] == 5
+        assert row["target"] == "127.0.0.1@53"
+        assert row["error"] == "TimeoutError('timed out')"
+        assert row["attempt"] == number
+        assert "attempts" not in row
+    assert store.counts["notify_fail"] == 6
+    service.flush_notifies(now=dues[-1][1] - 1)
+    assert capsys.readouterr().out == ""
+
+    def answered(query, host, port=53, source=None, timeout=1):
+        return dns.message.make_response(query)
+
+    monkeypatch.setattr("dns.query.udp", answered)
+    service.flush_notifies(now=122)
+    assert service._pending == {}
+    sent = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(row["level"], row["msg"])
+            for row in sent] == [("info", "NOTIFY sent")]
+    assert sent[0]["serial"] == 5
+    assert sent[0]["target"] == "127.0.0.1@53"
+    assert "attempt" not in sent[0]
+    assert store.counts["notify_ok"] == 1
 
 
 def test_catalog_soa_refresh_and_retry_are_60(settings):
