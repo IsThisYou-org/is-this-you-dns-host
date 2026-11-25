@@ -40,7 +40,7 @@ NSD binds port 53 as root and then drops to the `nsd` user. nginx's master binds
 
 Before nginx starts, `nginx -t -c /run/nginx/nginx.conf` checks the generated file. nginx opens its pid file, temporary directories, and compiled-in error log while testing, so those paths are on `/run` and `/tmp` (`/var/log/nginx` is a symlink to `/tmp/nginx-log`). Before NSD starts, `nsd-checkconf` checks the generated `nsd.conf`. A failed check is logged once at error level, naming the generated file, the checker's stderr, and that `config.yaml` is the likely cause. The start script then replaces itself with `sleep` instead of exiting, so BusyBox init does not respawn it every second. `ps` shows `sleep 1001` when the nginx check failed and `sleep 1002` when the NSD check failed. A rejected `config.yaml` holds the API on `sleep 1003`, the controller on `sleep 1004`, the UDP service on `sleep 1005`, and AXFR on `sleep 1006`.
 
-The Docker `HEALTHCHECK` still calls `/health`. That nginx location sets `access_log off`. A successful `/health`, `/ext/health`, or `/int/health` request is not written to gunicorn's access log or the application log. A failed health check is still logged.
+The Docker `HEALTHCHECK` runs `/usr/local/bin/healthcheck` (`--interval=30s`, `--timeout=3s`). It exits 0 only when both of these succeed: nginx answers `GET http://127.0.0.1/health`, and `dig -N -s 127.0.0.1:53 -t SOA` gets a SOA answer from NSD for the catalog zone. Recursion stays off; the command does not pass `-r`. The zone name is read from the generated `/opt/data/nsd/nsd.conf`, from the zone block marked `catalog: consumer`. `dig` is the small binary at `bin/dig`, copied into the image as `/usr/local/bin/dig` with the other scripts. On failure the script prints whether the REST check or the DNS check failed. On success it prints nothing. The `/health` location sets `access_log off`. A successful `/health`, `/ext/health`, or `/int/health` request is not written to gunicorn's access log or the application log. A failed health check is still logged.
 
 ### Layout
 
@@ -91,7 +91,7 @@ nginx presents each application tree as `/api/` on its own listener.
 * Internal, `127.0.0.1:8081` (fixed): `POST /api/zones/drop` and `POST /api/zones/parent-state` (gunicorn paths `/int/zones/...`). Expire and delete are not on the public listener. gunicorn listens on `127.0.0.1:8000`, which is also fixed.
 * Metrics, port 9100 (fixed): `GET /metrics`. nginx proxies that path to gunicorn `/int/metrics`.
 
-`/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. `/metrics` runs `nsd-control stats_noreset` and returns Prometheus text (`text/plain; version=0.0.4`). Names are prefixed `nsd_`. A failed scrape is HTTP 503 and `nsd_up 0`.
+`/health` reports the process, the catalog serial, and a localhost SOA query to the Python master. The container health check calls that URL and also asks NSD on `127.0.0.1:53` for the catalog SOA. `/metrics` runs `nsd-control stats_noreset` and returns Prometheus text (`text/plain; version=0.0.4`). Names are prefixed `nsd_`. A failed scrape is HTTP 503 and `nsd_up 0`.
 
 Publish port 9100 only on the internal network or the network where Prometheus runs. Do not publish it on a public interface. Restrict `/metrics` at the TLS shedder or the firewall as well if a scrape should not be anonymous; the service does not authenticate it.
 

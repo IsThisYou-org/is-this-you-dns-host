@@ -81,6 +81,16 @@ jobs:
           else:
               raise SystemExit(f"NSD did not serve catalog SOA: {last}")
           PY
+          if ! health_out=$(docker exec dns-host-ci /usr/local/bin/healthcheck); then
+            echo "health check failed:"
+            printf '%s\n' "$health_out"
+            exit 1
+          fi
+          if [ -n "$health_out" ]; then
+            echo "health check should be quiet on success:"
+            printf '%s\n' "$health_out"
+            exit 1
+          fi
           docker exec dns-host-ci sh -c 'ps w | grep -E "[n]ginx|[n]sd|[g]unicorn|[s]yslogd|[c]ontroller|[u]dp_service|[a]xfr_service|[c]rond"'
           readonly=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' dns-host-ci)
           test "$readonly" = "true"

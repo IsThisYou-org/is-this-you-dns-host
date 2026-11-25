@@ -32,7 +32,12 @@ def test_health_location_does_not_write_an_access_log():
 def test_health_endpoints_and_dockerfile_check_stay():
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "HEALTHCHECK" in dockerfile
-    assert "http://127.0.0.1/health" in dockerfile
+    assert "--interval=30s" in dockerfile
+    assert "--timeout=3s" in dockerfile
+    assert 'CMD ["/usr/local/bin/healthcheck"]' in dockerfile
+    script = (_ROOT / "bin" / "healthcheck").read_text(encoding="utf-8")
+    assert "http://127.0.0.1/health" in script
+    assert "dig -N -s 127.0.0.1:53 -t SOA" in script
     assert "ln -s /tmp/nginx-log /var/log/nginx" in dockerfile
 
 
