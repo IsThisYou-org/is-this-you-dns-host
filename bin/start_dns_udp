@@ -1,3 +1,5 @@
 #!/bin/sh
 set -eu
+# 1005 is the UDP service's config failure. ps shows "sleep 1005".
+python3 -c 'from dns_host.config import Settings; Settings.load().require_service_ns()' || exec sleep 1005
 exec python3 -m dns_host.udp_service

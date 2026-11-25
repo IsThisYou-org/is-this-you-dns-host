@@ -219,10 +219,10 @@ def test_invalid_level_does_not_change_the_active_threshold(
         Settings.from_mapping({"log_level": "verbose"})
     log("info", "still-hidden")
     log("warning", "still-kept")
-    assert [
-        json.loads(line)["msg"]
-        for line in capsys.readouterr().out.splitlines()
-    ] == ["still-kept"]
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [item["msg"]
+            for item in lines] == ["invalid configuration", "still-kept"]
+    assert "invalid log_level" in lines[0]["error"]
 
 
 def test_gunicorn_loggers_follow_log_level(tmp_path, monkeypatch):
