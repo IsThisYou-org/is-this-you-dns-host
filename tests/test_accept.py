@@ -24,7 +24,7 @@ def test_valid_zone_is_admitted_and_catalog_is_notified_first(env):
     again = post(env, env.lab.zone(serial=env.clock.t + 10))
     assert again.status_code == 200, again.get_json()
     assert again.get_json()["catalogUpdated"] is False
-    assert env.notifier.zones == ["catalog.svc.test.", "user.example."]
+    assert env.notifier.zones == ["user.example."]
     assert len(env.lab.calls) > before
 
 

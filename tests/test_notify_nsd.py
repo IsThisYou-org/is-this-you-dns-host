@@ -40,11 +40,11 @@ def _member(apex, serial):
                   expires_at=0)
 
 
-def _write_catalog(settings, members, now):
+def _write_catalog(settings, members, now, bump=True):
     catalog = Catalog(settings)
     catalog.load()
     catalog.zones = {m.apex: m for m in members}
-    catalog.save(now)
+    catalog.save(now, bump=bump)
     return catalog
 
 
@@ -67,16 +67,18 @@ def test_start_notifies_the_catalog_only_even_when_unchanged(settings, clock):
     assert recorder.sent == [(settings.catalog_zone.to_text(), catalog.serial)]
 
 
-def test_member_update_notifies_catalog_and_member(settings, clock):
-    _write_catalog(settings, [_member("a.example.", 7)], clock.t)
+def test_member_update_notifies_only_the_member(settings, clock):
+    first = _write_catalog(settings, [_member("a.example.", 7)], clock.t)
     recorder = Recorder()
     service = _service(settings, recorder)
     clock.t += 1
-    after = _write_catalog(settings, [_member("a.example.", 8)], clock.t)
+    after = _write_catalog(settings, [_member("a.example.", 8)],
+                           clock.t,
+                           bump=False)
     service._refresh_and_notify()
     service.flush_notifies(now=0)
-    assert recorder.sent == [(settings.catalog_zone.to_text(), after.serial),
-                             ("a.example.", 8)]
+    assert after.serial == first.serial
+    assert recorder.sent == [("a.example.", 8)]
 
 
 def test_every_catalog_serial_change_is_notified(settings, clock):
@@ -87,7 +89,7 @@ def test_every_catalog_serial_change_is_notified(settings, clock):
     for step in range(3):
         clock.t += 1
         serials.append(
-            _write_catalog(settings, [_member("a.example.", 10 + step)],
+            _write_catalog(settings, [_member(f"z{step}.example.", 10)],
                            clock.t).serial)
         service._refresh_and_notify()
         service.flush_notifies(now=0)
@@ -97,7 +99,8 @@ def test_every_catalog_serial_change_is_notified(settings, clock):
     assert catalog_sent == serials
 
 
-def test_notify_is_held_until_the_axfr_listener_accepts(settings, clock, capsys):
+def test_notify_is_held_until_the_axfr_listener_accepts(
+        settings, clock, capsys):
     """A closed AXFR port leaves the NOTIFY due. It is not a failed send."""
 
     _write_catalog(settings, [], clock.t)
@@ -126,9 +129,8 @@ def test_notify_is_held_until_the_axfr_listener_accepts(settings, clock, capsys)
     assert int(next(iter(soa)).serial) == after.serial
     assert "a.example." in service._pending
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [row["msg"] for row in lines] == [
-        "waiting for the AXFR listener before NOTIFY"
-    ]
+    assert [row["msg"] for row in lines
+            ] == ["waiting for the AXFR listener before NOTIFY"]
     assert lines[0]["bind"] == "127.0.0.1"
     assert lines[0]["port"] == 5353
     service.flush_notifies(now=10)
