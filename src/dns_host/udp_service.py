@@ -160,7 +160,10 @@ class UdpService:
             return
         self._axfr_wait_logged = False
         for zone, (soa, attempts, _due) in due_now:
-            ok = self.notifier.notify(zone, soa)
+            ok = self.notifier.notify(zone,
+                                      soa,
+                                      attempt=attempts + 1,
+                                      will_retry=True)
             with self._pending_lock:
                 if self._pending.get(zone, (None, ))[0] is not soa:
                     continue  # replaced by a newer SOA meanwhile
