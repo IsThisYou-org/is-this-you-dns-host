@@ -92,10 +92,32 @@ def _canonical(level: str) -> str | None:
     return _CANONICAL.get(str(level).strip().lower())
 
 
+def _quiet_health(level: str) -> bool:
+    """True when this line is routine noise from a health-check request.
+
+    Warnings and errors are kept, including a health check that failed.
+    """
+
+    canonical = _canonical(level)
+    if canonical is None or _RANK[canonical] >= _RANK["warning"]:
+        return False
+    try:
+        from flask import has_request_context, request
+    except ImportError:
+        return False
+    if not has_request_context():
+        return False
+    from dns_host.healthlog import is_health_path
+
+    return is_health_path(request.path)
+
+
 def log(level: str, msg: str, **fields: Any) -> None:
     global _opened
     canonical = _canonical(level)
     if canonical is not None and _RANK[canonical] < _threshold:
+        return
+    if _quiet_health(level):
         return
     record = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

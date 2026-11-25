@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 
 import dns.message
 import dns.query
@@ -16,6 +17,7 @@ from dns_host.catalog import catalog_soa
 from dns_host.config import DNS_BIND, DNS_PORT, Settings
 from dns_host.doh import DohClient
 from dns_host.errors import ApiError
+from dns_host.healthlog import SkipSuccessfulHealth
 from dns_host.logutil import log
 from dns_host.names import normalise_apex
 from dns_host.notify import UdpNotifier
@@ -39,6 +41,7 @@ def create_app(settings: Settings | None = None,
         notifier = UdpNotifier(settings, store)
 
     app = Flask("dns_host")
+    _install_health_filter()
     app.config["MAX_CONTENT_LENGTH"] = settings.max_body_bytes
     app.config["settings"] = settings
     app.config["store"] = store
@@ -69,6 +72,7 @@ def create_app(settings: Settings | None = None,
             return jsonify(body)
         body["status"] = "degraded"
         body["dns"] = "down"
+        log("error", "health check failed", path=request.path, dns="down")
         return jsonify(body), 503
 
     @app.get("/config")
@@ -225,6 +229,13 @@ def create_app(settings: Settings | None = None,
         return jsonify(error="not_found", message="not found"), 404
 
     return app
+
+
+def _install_health_filter() -> None:
+    logger = logging.getLogger("werkzeug")
+    if any(isinstance(item, SkipSuccessfulHealth) for item in logger.filters):
+        return
+    logger.addFilter(SkipSuccessfulHealth())
 
 
 def _read_body(settings: Settings) -> bytes:

@@ -1,4 +1,7 @@
 # busybox init. One respawn entry per daemon so a dead process is restarted.
+# BusyBox restarts a respawn entry about a second after it exits and does
+# not stop retrying. A failed config check does not exit: the start script
+# execs sleep with a distinct argument (1001 nginx, 1002 NSD).
 ::respawn:/usr/local/bin/start_syslog
 ::respawn:/usr/local/bin/start_api
 ::respawn:/usr/local/bin/start_controller
