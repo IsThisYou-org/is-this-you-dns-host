@@ -1,0 +1,12 @@
+#! /bin/sh
+
+tmp=$(mktemp)
+/usr/bin/dig @192.168.1.145 james.isthisyou.me axfr > ${tmp}
+./tools/zone_push.py \
+	--zone-file ${tmp}\
+	--apex james.isthisyou.me \
+	--axfr-server 192.168.1.145 \
+	--axfr-port 53 \
+	--base-url http://127.0.0.8/
+
+rm -f ${tmp}
