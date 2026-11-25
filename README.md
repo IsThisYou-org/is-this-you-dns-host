@@ -183,6 +183,14 @@ The parent NS name set must equal the apex NS set. If the parent is missing a se
 
 On success the API writes the validated zone document into the spool (an empty `mktemp` file in `/opt/data/spool`, the JSON under `spool/tmp`, then `rename` over the empty file). The controller, not the API, installs that document as the sharded JSON file, records metadata in SQLite, and updates the catalog. The catalog serial is `max(now, last + 1)` and is stored as the file mtime. NSD is not reloaded. It learns the new member from the catalog transfer. The AXFR service builds wire from the JSON file on each transfer.
 
+## Supported key rollovers
+
+ZSK rollover is pre-publish, as PowerDNS does it. Add the new ZSK, published but not signing. Wait. Switch signing from the old ZSK to the new one. Wait. Withdraw the old ZSK. Several RRSIGs over one RRset are accepted. This is tested end to end.
+
+KSK rollover is Double-RRset (RFC 7583). Publish the new KSK and the new DS alongside the old pair, so both DS records match both KSKs. Withdraw the old DS, then withdraw the old KSK. Admission needs at least one parent DS to match a KSK in the zone.
+
+Other rollover methods may work, but they are not supported.
+
 ## Processes
 
 | Process | How it runs | Role |
