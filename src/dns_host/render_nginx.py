@@ -85,6 +85,7 @@ http {{
         }}
 
         location = /health {{
+            access_log off;
             proxy_pass http://{GUNICORN_BIND}/ext/health;
             proxy_http_version 1.1;
             proxy_set_header Host $host;

@@ -30,6 +30,11 @@ logconfig_dict = {
             "format": "dns-api: %(message)s"
         }
     },
+    "filters": {
+        "skip_successful_health": {
+            "()": "dns_host.healthlog.SkipSuccessfulHealth",
+        },
+    },
     "handlers": {
         "syslog": {
             "class": "logging.handlers.SysLogHandler",
@@ -46,6 +51,7 @@ logconfig_dict = {
         "gunicorn.access": {
             "level": _level,
             "handlers": ["syslog"],
+            "filters": ["skip_successful_health"],
             "propagate": False,
         },
     },

@@ -12,6 +12,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from dns_host.checkconf import validate_generated
 from dns_host.config import (
     DNS_BIND,
     DNS_PORT,
@@ -150,6 +151,7 @@ def write_nsd_config(settings) -> Path:
 
     path = nsd_conf_path(settings)
     atomic_write(path, render_nsd(settings))
+    validate_generated(path, ["nsd-checkconf", str(path)])
     return path
 
 

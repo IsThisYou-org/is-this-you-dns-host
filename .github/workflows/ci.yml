@@ -94,3 +94,5 @@ jobs:
           docker exec dns-host-ci sh -c 'test -S /run/gunicorn.ctl && test -S /dev/shm/gunicorn.ctl'
           docker exec dns-host-ci sh -c 'test -f /opt/data/log/messages && test -d /opt/data/nsd && test -d /opt/data/zones && test -d /run/nsd && test -d /tmp/nginx-body'
           docker exec dns-host-ci sh -c 'test -f /run/nginx/nginx.conf && test -f /dev/shm/nginx/nginx.conf && test ! -e /opt/data/etc/nginx.conf'
+          docker exec dns-host-ci nginx -t -c /run/nginx/nginx.conf
+          docker exec dns-host-ci nsd-checkconf /opt/data/nsd/nsd.conf

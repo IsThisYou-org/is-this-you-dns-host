@@ -1,4 +1,7 @@
 # busybox init. One respawn entry per daemon so a dead process is restarted.
+# BusyBox restarts a respawn entry about a second after it exits and does
+# not stop retrying. A generated-config check that fails logs once and
+# exits; the next start does not log that same failure again.
 ::respawn:/usr/local/bin/start_syslog
 ::respawn:/usr/local/bin/start_api
 ::respawn:/usr/local/bin/start_controller

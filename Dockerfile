@@ -20,9 +20,10 @@ RUN apk add --no-cache \
         openssl \
     && rm -f /etc/nginx/http.d/default.conf /etc/nginx/conf.d/default.conf \
     && mkdir -p /opt/data/log /opt/data/zones /opt/data/etc /opt/data/nsd/zones /opt/data/nsd/xfr /opt/data/secrets \
-    && rm -rf /run /tmp \
+    && rm -rf /run /tmp /var/log/nginx \
     && ln -s /dev/shm /run \
-    && ln -s /dev/shm /tmp
+    && ln -s /dev/shm /tmp \
+    && ln -s /tmp/nginx-log /var/log/nginx
 
 WORKDIR /app
 COPY gunicorn.conf.py ./

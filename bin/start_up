@@ -19,7 +19,8 @@ mkdir -p \
   /tmp/nginx-proxy \
   /tmp/nginx-fastcgi \
   /tmp/nginx-uwsgi \
-  /tmp/nginx-scgi
+  /tmp/nginx-scgi \
+  /tmp/nginx-log
 chmod 1777 /tmp/nginx-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi
 if [ ! -f /opt/data/etc/config.yaml ]; then
   cp /usr/local/share/dns-host/config.example.yaml /opt/data/etc/config.yaml
