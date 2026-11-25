@@ -5,4 +5,5 @@ docker run -it \
 	--read-only \
 	-v /opt/data/is-this-you-dns-host:/opt/data/ \
 	-p 127.0.0.8:53:53/udp -p 127.0.0.8:53:53 -p 127.0.0.8:80:80 \
+	-p 192.168.1.143:53:53/udp -p 192.168.1.143:53:53 -p 192.168.1.143:80:80 \
 	is-this-you-dns-host $*
