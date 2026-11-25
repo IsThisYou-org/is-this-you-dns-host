@@ -421,18 +421,18 @@ class Settings:
                 loaded = yaml.safe_load(
                     config_path.read_text(encoding="utf-8"))
             except yaml.YAMLError as exc:
-                _fail([f"{config_path} is not valid YAML: {exc}"])
+                _fail([f"{config_path} is not valid YAML: {exc}"], config_path)
             if loaded is None:
                 loaded = {}
             if not isinstance(loaded, dict):
-                _fail([f"{config_path} must be a mapping"])
+                _fail([f"{config_path} must be a mapping"], config_path)
             raw = loaded
-        return cls.from_mapping(raw)
+        return cls.from_mapping(raw, config_path)
 
     @classmethod
-    def from_mapping(cls, raw: dict) -> "Settings":
+    def from_mapping(cls, raw: dict, path: Path | None = None) -> "Settings":
         if not isinstance(raw, dict):
-            _fail(["configuration must be a mapping"])
+            _fail(["configuration must be a mapping"], path)
         errors: list[str] = []
         _unknown_keys(raw, errors)
         log_level = _guard(errors, "log_level", lambda: _map_log_level(raw),
@@ -466,7 +466,7 @@ class Settings:
         health = _map_bool(raw, "health_check_dns", True, errors)
         _cross_checks(ints, failed, errors)
         if errors or catalog is None or rname is None:
-            _fail(errors or ["invalid configuration"])
+            _fail(errors or ["invalid configuration"], path)
         return cls(
             service_ns=service_ns,
             secondaries=secondaries,
@@ -516,12 +516,18 @@ class Settings:
         )
 
 
-def _fail(problems: list[str]) -> None:
-    """Log every collected problem once, then exit without a traceback."""
+def _fail(problems: list[str], path: Path | None = None) -> None:
+    """Log every collected problem once, then exit without a traceback.
 
-    message = "\n".join(line for line in problems if line.strip())
-    if not message:
-        message = "invalid configuration"
+    The logged ``error`` and the ``SystemExit`` text both name the file
+    that was loaded, then list one problem per line.
+    """
+
+    source = CONFIG_PATH if path is None else Path(path)
+    body = "\n".join(line for line in problems if line.strip())
+    if not body:
+        body = "invalid configuration"
+    message = f"{source} is invalid:\n{body}"
     from dns_host.logutil import log
 
     log("error", "invalid configuration", error=message)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dns_host.config import Settings, _INT_FIELDS
+from dns_host.config import CONFIG_PATH, Settings, _INT_FIELDS
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -138,8 +138,11 @@ def test_multiple_errors_are_reported_together(monkeypatch):
         })
     text = str(raised.value)
     assert raised.value.__cause__ is None
+    header = f"{CONFIG_PATH} is invalid:"
+    assert text.startswith(header + "\n")
     lines = [line for line in text.splitlines() if line.strip()]
-    assert len(lines) >= 5
+    assert lines[0] == header
+    assert len(lines) >= 6
     assert any("gunicorn_worker" in line and "gunicorn_workers" in line
                for line in lines)
     assert any("min_ttl" in line and "max_ttl" in line for line in lines)
@@ -207,15 +210,39 @@ def test_example_config_loads(monkeypatch):
     assert "Unknown keys are rejected" in readme
 
 
+def test_validation_error_names_the_loaded_file(tmp_path, monkeypatch):
+    logged = []
+
+    def capture(level, msg, **fields):
+        logged.append((level, msg, fields))
+
+    monkeypatch.setattr("dns_host.logutil.log", capture)
+    path = tmp_path / "operator.yaml"
+    path.write_text("gunicorn_workers: 0\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as raised:
+        Settings.load(path)
+    text = str(raised.value)
+    header = f"{path} is invalid:"
+    assert text.startswith(header + "\n")
+    assert "gunicorn_workers" in text.splitlines()[1]
+    assert len(logged) == 1
+    level, msg, fields = logged[0]
+    assert level == "error"
+    assert msg == "invalid configuration"
+    assert fields["error"] == text
+
+
 def test_broken_yaml_is_a_config_error_without_a_traceback(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("service_ns: [\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="YAML") as raised:
         Settings.load(path)
     assert raised.value.__cause__ is None
+    assert str(raised.value).startswith(f"{path} is invalid:\n")
     path.write_text("- just-a-list\n", encoding="utf-8")
-    with pytest.raises(SystemExit, match="mapping"):
+    with pytest.raises(SystemExit, match="mapping") as raised:
         Settings.load(path)
+    assert str(raised.value).startswith(f"{path} is invalid:\n")
 
 
 def test_mapping_defaults_match_direct_construction():
