@@ -67,7 +67,5 @@ rate_limit_requests: 30
 rate_limit_window_seconds: 60
 parent_query_budget: 15
 parent_query_window_seconds: 60
-ds_digest_types:
-  - 2
 # YAML boolean (`true` or `false`). A quoted string or a number is rejected.
 health_check_dns: true

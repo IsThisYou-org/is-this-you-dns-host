@@ -43,7 +43,12 @@ RRSIG = dns.rdatatype.RRSIG
 NSEC = dns.rdatatype.NSEC
 NSEC3 = dns.rdatatype.NSEC3
 
-_DIGEST_NAMES = {1: "SHA1", 2: "SHA256", 4: "SHA384"}
+# Tried in this order, per DS algorithm. SHA-256 is enough on its own
+# (RFC 4035). SHA-384 is hashed only when no SHA-256 DS matches that
+# algorithm. SHA-1 is not accepted (RFC 4509).
+DS_DIGEST_TYPES = (2, 4)
+
+_DIGEST_NAMES = {2: "SHA256", 4: "SHA384"}
 
 
 @dataclass
@@ -348,8 +353,7 @@ def _cached_dnskey(lookup,
         hit = cache.get(root_id, name.to_text(), now)
         if hit is not None:
             dnskey, signatures = hit
-            if _keys_matching_ds(name, dnskey, ds_records,
-                                 settings.ds_digest_types):
+            if _keys_matching_ds(name, dnskey, ds_records):
                 return dnskey, signatures
     dnskey, signatures = _query_type(lookup,
                                      settings,
@@ -360,8 +364,7 @@ def _cached_dnskey(lookup,
     if dnskey is None or signatures is None:
         raise ApiError(503, "parent_lookup_unavailable",
                        f"{what} was not returned")
-    matched = _keys_matching_ds(name, dnskey, ds_records,
-                                settings.ds_digest_types)
+    matched = _keys_matching_ds(name, dnskey, ds_records)
     if not matched:
         raise ApiError(403, "parent_chain_invalid",
                        f"{what} does not match the trust anchor or parent DS")
@@ -490,23 +493,16 @@ def _rrset_of(name, ttl, rdatas):
     return dns.rrset.from_rdata(name, ttl or 300, *rdatas)
 
 
-def _keys_matching_ds(name, dnskey_rrset, ds_records, allowed_digests) -> list:
-    matched = []
-    for ds in _supported_ds(ds_records, allowed_digests):
-        for key in dnskey_rrset:
-            if _key_matches_ds(name, key, ds) and key not in matched:
-                matched.append(key)
+def _keys_matching_ds(name, dnskey_rrset, ds_records) -> list:
+    matched, _unmatched = match_ds_by_algorithm(name, dnskey_rrset, ds_records)
     return matched
 
 
-def _supported_ds(ds_records, allowed_digests) -> list:
-    """DS records whose digest type is allowed and known. Others are ignored."""
+def _supported_ds(ds_records) -> list:
+    """DS records with digest type SHA-256 or SHA-384. Others are ignored."""
 
-    allowed = {int(item) for item in allowed_digests}
-    return [
-        ds for ds in ds_records if int(ds.digest_type) in allowed
-        and int(ds.digest_type) in _DIGEST_NAMES
-    ]
+    allowed = {int(item) for item in DS_DIGEST_TYPES}
+    return [ds for ds in ds_records if int(ds.digest_type) in allowed]
 
 
 def _key_matches_ds(name, key, ds) -> bool:
@@ -522,35 +518,56 @@ def _key_matches_ds(name, key, ds) -> bool:
     return calculated.digest == ds.digest
 
 
-def match_ds_by_algorithm(name, dnskey_rrset, ds_records,
-                          allowed_digests) -> tuple[list, list]:
+def match_ds_by_algorithm(name, dnskey_rrset, ds_records) -> tuple[list, list]:
     """Match parent DS to the zone's KSKs, one algorithm at a time.
 
     Returns the matched KSKs and the DS algorithms with no match. Every
     algorithm in the supported DS set needs at least one DS that matches a
     KSK of that algorithm (RFC 4035 section 2.2). Within an algorithm any
     single match is enough, so a DS for a key already removed is allowed.
+    Digest types are tried in ``DS_DIGEST_TYPES`` order. SHA-384 is hashed
+    only when no SHA-256 DS matched for that algorithm.
     """
 
-    supported = _supported_ds(ds_records, allowed_digests)
+    supported = _supported_ds(ds_records)
     keys = list(dnskey_rrset or [])
     matched = []
     unmatched = []
     for algorithm in sorted({int(ds.algorithm) for ds in supported}):
-        found = False
-        for ds in supported:
-            if int(ds.algorithm) != algorithm:
-                continue
-            for key in keys:
-                if _key_matches_ds(name, key, ds):
-                    found = True
-                    if key not in matched:
-                        matched.append(key)
-        if not found:
+        group = [ds for ds in supported if int(ds.algorithm) == algorithm]
+        found = _match_digest_preference(name, keys, group)
+        if found:
+            for key in found:
+                if key not in matched:
+                    matched.append(key)
+        else:
             unmatched.append(algorithm)
     if not supported:
         return [], []
     return matched, unmatched
+
+
+def _match_digest_preference(name, keys, ds_records) -> list:
+    """Keys matched by the first digest type that hits.
+
+    ``DS_DIGEST_TYPES`` is the preference order. Once a type matches, later
+    types are not hashed.
+    """
+
+    for digest_type in DS_DIGEST_TYPES:
+        chosen = [
+            ds for ds in ds_records if int(ds.digest_type) == int(digest_type)
+        ]
+        if not chosen:
+            continue
+        found = []
+        for ds in chosen:
+            for key in keys:
+                if _key_matches_ds(name, key, ds) and key not in found:
+                    found.append(key)
+        if found:
+            return found
+    return []
 
 
 def _is_nxdomain(response) -> bool:

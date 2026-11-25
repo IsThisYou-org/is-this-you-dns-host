@@ -173,17 +173,11 @@ def test_doh_timeout_must_be_a_positive_number():
     }).doh_timeout_seconds == 1.5
 
 
-def test_ds_digest_types_must_be_ints_in_range():
-    with pytest.raises(SystemExit, match="ds_digest_types") as raised:
-        Settings.from_mapping({"ds_digest_types": [2, 256]})
-    assert "256" in str(raised.value)
-    with pytest.raises(SystemExit, match="ds_digest_types"):
-        Settings.from_mapping({"ds_digest_types": [True]})
-    with pytest.raises(SystemExit, match="ds_digest_types"):
-        Settings.from_mapping({"ds_digest_types": ["sha256"]})
-    assert Settings.from_mapping({
-        "ds_digest_types": [2, 4]
-    }).ds_digest_types == (2, 4)
+def test_ds_digest_types_is_rejected_as_an_unknown_key():
+    with pytest.raises(SystemExit,
+                       match="unknown key 'ds_digest_types'") as raised:
+        Settings.from_mapping({"ds_digest_types": [2, 4]})
+    assert raised.value.__cause__ is None
 
 
 def test_example_config_loads(monkeypatch):
@@ -253,7 +247,6 @@ def test_mapping_defaults_match_direct_construction():
         assert getattr(bare, name) == default
     assert loaded.doh_timeout_seconds == bare.doh_timeout_seconds == 5.0
     assert loaded.health_check_dns is True
-    assert loaded.ds_digest_types == (2, )
     assert loaded.log_level == "info"
 
 

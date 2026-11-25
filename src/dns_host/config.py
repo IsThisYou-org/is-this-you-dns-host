@@ -99,7 +99,6 @@ _KNOWN_KEYS = frozenset(_INT_FIELDS) | {
     "resolver_base_url",
     "catalog_zone",
     "catalog_rname",
-    "ds_digest_types",
     "doh_timeout_seconds",
     "handshake_root_servers",
     "handshake_trust_anchor_file",
@@ -337,7 +336,6 @@ class Settings:
     negative_cache_ttl_seconds: int = 60
     min_ttl: int = 30
     max_ttl: int = 86400
-    ds_digest_types: tuple = (2, )
     apexes_per_parent_per_day: int = 0
     doh_timeout_seconds: float = 5.0
     doh_cd: int = 1
@@ -444,7 +442,6 @@ class Settings:
                                 errors)
         rname = _catalog_rname(raw, catalog, errors)
         types = _type_allowlist(raw, errors)
-        digests = _digest_types(raw, errors)
         secondaries = _guard(
             errors, "secondaries",
             lambda: _secondaries_value(raw.get("secondaries", [])), [])
@@ -496,7 +493,6 @@ class Settings:
             negative_cache_ttl_seconds=ints["negative_cache_ttl_seconds"],
             min_ttl=ints["min_ttl"],
             max_ttl=ints["max_ttl"],
-            ds_digest_types=digests,
             apexes_per_parent_per_day=ints["apexes_per_parent_per_day"],
             doh_timeout_seconds=timeout,
             doh_cd=ints["doh_cd"],
@@ -696,57 +692,6 @@ def _type_allowlist(raw: dict, errors: list[str]) -> frozenset:
     if bad or not names:
         return _default_types()
     return frozenset(names)
-
-
-def _digest_types(raw: dict, errors: list[str]) -> tuple:
-    key = "ds_digest_types"
-    if key not in raw or raw.get(key) in (None, ""):
-        return (2, )
-    value = raw.get(key)
-    if isinstance(value, str):
-        items = [part.strip() for part in value.split(",") if part.strip()]
-    elif isinstance(value, (list, tuple)):
-        items = list(value)
-    else:
-        errors.append(
-            f"invalid {key} {value!r}: expected a list of integers from 0 to 255"
-        )
-        return (2, )
-    out: list[int] = []
-    before = len(errors)
-    for item in items:
-        number = _digest_item(key, item, errors)
-        if number is not None:
-            out.append(number)
-    if out:
-        return tuple(out)
-    if len(errors) == before:
-        errors.append(f"invalid {key}: expected at least one digest type")
-    return (2, )
-
-
-def _digest_item(key: str, item, errors: list[str]) -> int | None:
-    if isinstance(item, str):
-        text = item.strip()
-        if not text:
-            return None
-        try:
-            number = int(text, 10)
-        except ValueError:
-            errors.append(
-                f"invalid {key} {item!r}: expected an integer from 0 to 255")
-            return None
-    elif isinstance(item, bool) or not isinstance(item, int):
-        errors.append(
-            f"invalid {key} {item!r}: expected an integer from 0 to 255")
-        return None
-    else:
-        number = item
-    if number < 0 or number > 255:
-        errors.append(
-            f"invalid {key} {number}: expected an integer from 0 to 255")
-        return None
-    return number
 
 
 def _mapping_name(raw: dict, key: str, default: str, errors: list[str]):

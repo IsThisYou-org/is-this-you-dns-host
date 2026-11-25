@@ -1,16 +1,20 @@
 """Parent DS against the uploaded KSKs during a KSK rollover.
 
 All keys here are synthetic. A parent DS set passes when, for each DS
-algorithm, at least one DS (of a supported digest type) matches a KSK of
-that algorithm which signs the DNSKEY RRset. A DS for a key already removed
-from the zone is allowed.
+algorithm, at least one DS matches a KSK of that algorithm which signs the
+DNSKEY RRset. SHA-256 is tried first. SHA-384 is hashed only when no SHA-256
+DS matched for that algorithm. SHA-1 is ignored. A DS for a key already
+removed from the zone is allowed.
 """
 
 import dns.dnssec
 import dns.name
+import dns.rdataclass
+import dns.rdatatype
+import dns.rdata
 import dns.rrset
 
-from dns_host.chain import match_ds_by_algorithm
+from dns_host.chain import _keys_matching_ds, match_ds_by_algorithm
 from dns_host.zonesign import generate_key
 from tests.conftest import post
 from tests.test_ksk_double_rrset import _double_ksk
@@ -47,32 +51,106 @@ def test_one_ds_two_ksks_passes(env):
     assert response.status_code == 201, response.get_json()
 
 
-def test_two_ds_of_different_digest_types(env):
+def _watch_digests(monkeypatch):
+    seen = []
+    real = dns.dnssec.make_ds
+
+    def spy(name, key, algorithm, *args, **kwargs):
+        seen.append(str(algorithm).upper())
+        return real(name, key, algorithm, *args, **kwargs)
+
+    monkeypatch.setattr(dns.dnssec, "make_ds", spy)
+    return seen
+
+
+def _sha1_ds(key):
+    # dnspython refuses to build a SHA-1 DS. The digest bytes are irrelevant:
+    # digest type 1 is ignored before it is hashed.
+    return dns.rdata.from_text(
+        dns.rdataclass.IN, dns.rdatatype.DS,
+        f"{int(dns.dnssec.key_id(key))} {int(key.algorithm)} 1 {'ab' * 20}")
+
+
+def test_sha256_match_does_not_hash_sha384(env, monkeypatch):
     lab = env.lab
-    env.settings.ds_digest_types = (2, 4)
-    _priv, removed = generate_key(257)
-    _publish_ds(lab, _ds(lab, removed, "SHA256"),
-                _ds(lab, lab.child_ksk, "SHA384"))
-    response = post(env, lab.zone(serial=lab.now))
+    sha256 = _ds(lab, lab.child_ksk, "SHA256")
+    sha384 = _ds(lab, lab.child_ksk, "SHA384")
+    # SHA-384 is first in the RRset so preference, not wire order, decides.
+    _publish_ds(lab, sha384, sha256)
+    body = lab.zone(serial=lab.now)
+    seen = _watch_digests(monkeypatch)
+    response = post(env, body)
     assert response.status_code == 201, response.get_json()
+    assert "SHA384" not in seen
+    assert "SHA256" in seen
 
 
-def test_unsupported_digest_type_is_ignored(env):
-    lab = env.lab
-    assert tuple(env.settings.ds_digest_types) == (2, )
-    # SHA-384 is not in the allow-list: that DS is skipped, not fatal.
-    _publish_ds(lab, _ds(lab, lab.child_ksk, "SHA384"),
-                _ds(lab, lab.child_ksk, "SHA256"))
-    response = post(env, lab.zone(serial=lab.now))
-    assert response.status_code == 201, response.get_json()
-
-
-def test_only_unsupported_digest_type_is_rejected(env):
+def test_sha384_only_ds_is_accepted(env, monkeypatch):
     lab = env.lab
     _publish_ds(lab, _ds(lab, lab.child_ksk, "SHA384"))
+    body = lab.zone(serial=lab.now)
+    seen = _watch_digests(monkeypatch)
+    response = post(env, body)
+    assert response.status_code == 201, response.get_json()
+    assert "SHA384" in seen
+
+
+def test_sha384_is_accepted_when_sha256_does_not_match(env, monkeypatch):
+    lab = env.lab
+    sha256 = _ds(lab, lab.child_ksk, "SHA256")
+    flipped = bytearray(sha256.digest)
+    flipped[0] ^= 0xff
+    bad = dns.rdata.from_text(
+        dns.rdataclass.IN, dns.rdatatype.DS,
+        f"{int(sha256.key_tag)} {int(sha256.algorithm)} 2 {flipped.hex()}")
+    _publish_ds(lab, bad, _ds(lab, lab.child_ksk, "SHA384"))
+    body = lab.zone(serial=lab.now)
+    seen = _watch_digests(monkeypatch)
+    response = post(env, body)
+    assert response.status_code == 201, response.get_json()
+    assert "SHA256" in seen
+    assert "SHA384" in seen
+
+
+def test_sha1_ds_is_rejected(env):
+    lab = env.lab
+    _publish_ds(lab, _sha1_ds(lab.child_ksk))
     response = post(env, lab.zone(serial=lab.now))
     assert response.status_code == 403, response.get_json()
     assert response.get_json()["error"] == "parent_ds_mismatch"
+
+
+def test_keys_matching_ds_skips_sha384_when_sha256_matches(monkeypatch):
+    _priv, key = generate_key(257)
+    name = dns.name.from_text("user.example.")
+    sha256 = dns.dnssec.make_ds(name, key, "SHA256")
+    sha384 = dns.dnssec.make_ds(name, key, "SHA384")
+    keys = dns.rrset.from_rdata(name, 300, key)
+    seen = _watch_digests(monkeypatch)
+    matched, unmatched = match_ds_by_algorithm(name, keys, [sha384, sha256])
+    assert matched == [key]
+    assert unmatched == []
+    assert _keys_matching_ds(name, keys, [sha384, sha256]) == [key]
+    assert seen == ["SHA256", "SHA256"]
+
+
+def test_sha256_on_one_algorithm_does_not_skip_sha384_on_another(monkeypatch):
+    _p13, k13 = generate_key(257, 13)
+    _p15, k15 = generate_key(257, 15)
+    name = dns.name.from_text("user.example.")
+    ds13_sha256 = dns.dnssec.make_ds(name, k13, "SHA256")
+    ds13_sha384 = dns.dnssec.make_ds(name, k13, "SHA384")
+    ds15_sha384 = dns.dnssec.make_ds(name, k15, "SHA384")
+    keys = dns.rrset.from_rdata(name, 300, k13, k15)
+    seen = _watch_digests(monkeypatch)
+    matched, unmatched = match_ds_by_algorithm(
+        name, keys, [ds13_sha384, ds13_sha256, ds15_sha384])
+    assert unmatched == []
+    assert matched == [k13, k15]
+    assert seen.count("SHA256") == 1
+    assert seen.count("SHA384") == 1
+    assert _keys_matching_ds(
+        name, keys, [ds13_sha384, ds13_sha256, ds15_sha384]) == [k13, k15]
 
 
 def test_no_match_is_rejected_with_key_tags(env):
@@ -124,7 +202,7 @@ def test_match_uses_canonical_owner_name():
     upper = dns.name.from_text("USER.Example.")
     ds = dns.dnssec.make_ds(lower, key, "SHA256")
     keys = dns.rrset.from_rdata(upper, 300, key)
-    matched, unmatched = match_ds_by_algorithm(upper, keys, [ds], (2, ))
+    matched, unmatched = match_ds_by_algorithm(upper, keys, [ds])
     assert matched == [key]
     assert unmatched == []
 
