@@ -437,23 +437,65 @@ def _rrset_of(name, ttl, rdatas):
 
 def _keys_matching_ds(name, dnskey_rrset, ds_records, allowed_digests) -> list:
     matched = []
-    allowed = {int(item) for item in allowed_digests}
-    for ds in ds_records:
-        digest_type = int(ds.digest_type)
-        if digest_type not in allowed or digest_type not in _DIGEST_NAMES:
-            continue
+    for ds in _supported_ds(ds_records, allowed_digests):
         for key in dnskey_rrset:
-            if int(key.algorithm) != int(ds.algorithm):
-                continue
-            if int(dns.dnssec.key_id(key)) != int(ds.key_tag):
-                continue
-            if (int(key.flags) & 0x0101) != 0x0101:
-                continue
-            calculated = dns.dnssec.make_ds(name, key,
-                                            _DIGEST_NAMES[digest_type])
-            if calculated.digest == ds.digest:
+            if _key_matches_ds(name, key, ds) and key not in matched:
                 matched.append(key)
     return matched
+
+
+def _supported_ds(ds_records, allowed_digests) -> list:
+    """DS records whose digest type is allowed and known. Others are ignored."""
+
+    allowed = {int(item) for item in allowed_digests}
+    return [
+        ds for ds in ds_records if int(ds.digest_type) in allowed
+        and int(ds.digest_type) in _DIGEST_NAMES
+    ]
+
+
+def _key_matches_ds(name, key, ds) -> bool:
+    if int(key.algorithm) != int(ds.algorithm):
+        return False
+    if int(dns.dnssec.key_id(key)) != int(ds.key_tag):
+        return False
+    if (int(key.flags) & 0x0101) != 0x0101:
+        return False
+    # make_ds hashes the canonical (lowercase) owner wire form plus the rdata.
+    calculated = dns.dnssec.make_ds(name, key,
+                                    _DIGEST_NAMES[int(ds.digest_type)])
+    return calculated.digest == ds.digest
+
+
+def match_ds_by_algorithm(name, dnskey_rrset, ds_records,
+                          allowed_digests) -> tuple[list, list]:
+    """Match parent DS to the zone's KSKs, one algorithm at a time.
+
+    Returns the matched KSKs and the DS algorithms with no match. Every
+    algorithm in the supported DS set needs at least one DS that matches a
+    KSK of that algorithm (RFC 4035 section 2.2). Within an algorithm any
+    single match is enough, so a DS for a key already removed is allowed.
+    """
+
+    supported = _supported_ds(ds_records, allowed_digests)
+    keys = list(dnskey_rrset or [])
+    matched = []
+    unmatched = []
+    for algorithm in sorted({int(ds.algorithm) for ds in supported}):
+        found = False
+        for ds in supported:
+            if int(ds.algorithm) != algorithm:
+                continue
+            for key in keys:
+                if _key_matches_ds(name, key, ds):
+                    found = True
+                    if key not in matched:
+                        matched.append(key)
+        if not found:
+            unmatched.append(algorithm)
+    if not supported:
+        return [], []
+    return matched, unmatched
 
 
 def _is_nxdomain(response) -> bool:
