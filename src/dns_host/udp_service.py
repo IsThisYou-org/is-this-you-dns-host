@@ -5,7 +5,10 @@ Zone files are not read. The catalog SOA serial is the catalog file's mtime.
 The file is polled; NOTIFY is sent to the local NSD for the catalog and for
 new or updated members when it changes. At start-up, once the catalog has
 loaded, the catalog alone is notified, because NSD may hold an old catalog
-from before a restart. A NOTIFY that NSD does not acknowledge is retried with backoff.
+from before a restart. The send waits until the AXFR listener accepts a
+connection: NSD transfers immediately, and a refused connection on a zone
+it has never loaded waits about 20 to 40 seconds. A NOTIFY that NSD does
+not acknowledge is retried with backoff.
 """
 
 from __future__ import annotations
@@ -47,15 +50,16 @@ class UdpService:
         # the catalog ahead of its members.
         self._pending: dict[str, tuple] = {}
         self._pending_lock = threading.Lock()
+        self._axfr_wait_logged = False
 
     def start(self) -> int:
         # Load first, then bind: nothing listens until the real catalog
         # has been read, so an empty catalog can never be served.
         wait_for_catalog(self.catalog)
         self._snapshot = self.catalog.snapshot()
-        # Start-up: NOTIFY the catalog only. NSD then checks the catalog
-        # SOA and transfers it if it is behind. Members are notified when
-        # they change.
+        # Start-up: NOTIFY the catalog only. The send waits until AXFR is
+        # accepting; NSD then transfers the catalog if it is behind.
+        # Members are notified when they change.
         self._queue([(self.settings.catalog_zone.to_text(),
                       catalog_soa(self.settings, self.catalog.serial))])
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -141,6 +145,20 @@ class UdpService:
         with self._pending_lock:
             due_now = [(zone, item) for zone, item in self._pending.items()
                        if item[2] <= now]
+        if not due_now:
+            return
+        ready = getattr(self.notifier, "master_ready", None)
+        if callable(ready) and not ready():
+            # Leave the NOTIFY due. Counting this as a refusal would back
+            # off the send, and NSD would still be inside its own wait.
+            if not self._axfr_wait_logged:
+                log("warning",
+                    "waiting for the AXFR listener before NOTIFY",
+                    bind=DNS_BIND,
+                    port=DNS_PORT)
+                self._axfr_wait_logged = True
+            return
+        self._axfr_wait_logged = False
         for zone, (soa, attempts, _due) in due_now:
             ok = self.notifier.notify(zone, soa)
             with self._pending_lock:

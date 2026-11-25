@@ -89,6 +89,51 @@ def fetch_delegation_ns(lookup, settings, child, parent_servers, glue, budget):
     raise delegation_lookup_error(child_name, reached, errors)
 
 
+def query_parent_servers(lookup, settings, qname, rdtype: str, servers, glue,
+                         budget) -> list:
+    """Ask every parent nameserver for ``qname``/``rdtype`` with DO set.
+
+    Returns ``(label, LookupResponse)`` for each NOERROR answer. A server
+    that does not answer is skipped. This bypasses resolver caches, so a
+    record the parent has just published is seen at once. An in-memory
+    lookup may implement ``answer_direct(qname, rdtype, server)``.
+    """
+
+    hook = _find_hook(lookup, "answer_direct")
+    name = _as_name(qname)
+    if glue is None:
+        glue = {}
+    timeout = _timeout(settings)
+    answers = []
+    for server in servers or []:
+        try:
+            server_name = _as_name(server)
+        except Exception:
+            continue
+        label = server_name.to_text()
+        if hook is not None:
+            budget.charge()
+            response = hook(name, rdtype, label)
+            if response is not None and int(response.status) == 0:
+                answers.append((label, response))
+            continue
+        for address in _addresses(lookup, server_name, glue):
+            try:
+                message = _exchange(address,
+                                    name,
+                                    timeout,
+                                    budget,
+                                    rdtype=dns.rdatatype.from_text(rdtype),
+                                    dnssec=True)
+            except _Transport:
+                continue
+            if int(message.rcode()) != 0:
+                continue
+            answers.append((f"{label} {address}", message_to_lookup(message)))
+            break
+    return answers
+
+
 def delegation_lookup_error(child, reached: bool, errors: list) -> ApiError:
     """503 for a delegation query that produced no NOERROR or NXDOMAIN."""
 
@@ -139,19 +184,28 @@ class _Transport(Exception):
 
 
 def _answer_delegation(lookup):
+    return _find_hook(lookup, "answer_delegation")
+
+
+def _find_hook(lookup, attribute: str):
     current = lookup
     seen = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        hook = getattr(current, "answer_delegation", None)
+        hook = getattr(current, attribute, None)
         if callable(hook):
             return hook
         current = getattr(current, "inner", None)
     return None
 
 
-def _exchange(address: str, qname, timeout: float, budget):
-    query = dns.message.make_query(qname, dns.rdatatype.NS, flags=0)
+def _exchange(address: str,
+              qname,
+              timeout: float,
+              budget,
+              rdtype=dns.rdatatype.NS,
+              dnssec: bool = False):
+    query = dns.message.make_query(qname, rdtype, flags=0, want_dnssec=dnssec)
     budget.charge()
     try:
         response = dns.query.udp(query, address, timeout=timeout, port=53)

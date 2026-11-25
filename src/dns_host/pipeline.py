@@ -14,9 +14,15 @@ import dns.name
 import dns.rdatatype
 import dns.rrset
 
-from dns_host.chain import Delegation, authenticate_parent
+from dns_host.chain import (
+    Delegation,
+    authenticate_parent,
+    direct_parent_ds,
+    match_ds_by_algorithm,
+)
 from dns_host.denial import check_nsec3
 from dns_host.errors import ApiError
+from dns_host.logutil import log
 from dns_host.rrtypes import WALLET_TYPE, admission_block_reason, type_name
 from dns_host.zone import ParsedZone
 
@@ -307,34 +313,80 @@ def parent_checks(zone: ParsedZone, settings, lookup) -> Delegation:
     return delegation
 
 
-def ds_matches(zone: ParsedZone, delegation: Delegation, settings) -> list:
-    from dns_host.chain import _keys_matching_ds
-
-    matched = _keys_matching_ds(zone.apex, zone.get(DNSKEY),
-                                list(delegation.ds_rrset),
-                                settings.ds_digest_types)
-    if not matched:
-        raise _err(403, "parent_ds_mismatch",
-                   "parent DS does not match a KSK in the uploaded zone")
+def ds_matches(zone: ParsedZone,
+               delegation: Delegation,
+               settings,
+               lookup=None) -> list:
+    ds_records = list(delegation.ds_rrset)
+    matched, unmatched = match_ds_by_algorithm(zone.apex, zone.get(DNSKEY),
+                                               ds_records,
+                                               settings.ds_digest_types)
+    if (not matched or unmatched) and lookup is not None:
+        # The resolver can hold the DS RRset from before the parent last
+        # changed it. Ask the parent's own nameservers before rejecting.
+        direct = direct_parent_ds(lookup, settings, zone.apex, delegation)
+        fresh = ds_records + [ds for ds in direct if ds not in ds_records]
+        if len(fresh) > len(ds_records):
+            ds_records = fresh
+            matched, unmatched = match_ds_by_algorithm(
+                zone.apex, zone.get(DNSKEY), ds_records,
+                settings.ds_digest_types)
+            if matched and not unmatched:
+                log("info",
+                    "parent DS taken from the parent nameservers",
+                    apex=zone.apex.to_text(),
+                    ds=_ds_tags(ds_records))
+    if not matched or unmatched:
+        detail = ""
+        if matched and unmatched:
+            algs = ", ".join(str(alg) for alg in unmatched)
+            detail = f" for algorithm {algs}"
+        raise _err(
+            403,
+            "parent_ds_mismatch",
+            f"parent DS does not match a KSK in the uploaded zone{detail}; "
+            f"parent DS: {_ds_tags(ds_records)}; "
+            f"zone KSK: {_ksk_tags(zone.ksks())}",
+        )
     return matched
+
+
+def _ds_tags(ds_records) -> str:
+    items = sorted((int(ds.key_tag), int(ds.algorithm), int(ds.digest_type))
+                   for ds in ds_records)
+    if not items:
+        return "none"
+    return ", ".join(f"{tag} (alg {alg}, digest {digest})"
+                     for tag, alg, digest in items)
+
+
+def _ksk_tags(keys) -> str:
+    items = sorted(
+        (int(dns.dnssec.key_id(key)), int(key.algorithm)) for key in keys)
+    if not items:
+        return "none"
+    return ", ".join(f"{tag} (alg {alg})" for tag, alg in items)
 
 
 def verify_signatures(zone: ParsedZone, matched_ksks, now: int) -> None:
     dnskey = zone.get(DNSKEY)
     ksk_rrset = dns.rrset.from_rdata(zone.apex, dnskey.ttl, *matched_ksks)
     dnskey_sigs = zone.sigs.get((zone.apex, DNSKEY))
-    ksk_tags = {int(dns.dnssec.key_id(key)) for key in matched_ksks}
-    saw_ksk_sig = False
+    ksk_tags = {(int(dns.dnssec.key_id(key)), int(key.algorithm))
+                for key in matched_ksks}
+    # Each DS algorithm has a matched KSK; one of them must sign DNSKEY.
+    need_algs = {int(key.algorithm) for key in matched_ksks}
+    signed_algs = set()
     try:
-        for sig in dnskey_sigs:
-            if int(sig.key_tag) in ksk_tags:
+        for sig in dnskey_sigs or []:
+            if (int(sig.key_tag), int(sig.algorithm)) in ksk_tags:
                 dns.dnssec.validate(
                     dnskey,
                     dns.rrset.from_rdata(zone.apex, dnskey.ttl, sig),
                     {zone.apex: ksk_rrset},
                     now=float(now),
                 )
-                saw_ksk_sig = True
+                signed_algs.add(int(sig.algorithm))
             else:
                 dns.dnssec.validate(
                     dnskey,
@@ -342,7 +394,7 @@ def verify_signatures(zone: ParsedZone, matched_ksks, now: int) -> None:
                     {zone.apex: dnskey},
                     now=float(now),
                 )
-        if not saw_ksk_sig:
+        if not need_algs or not need_algs <= signed_algs:
             raise _err(422, "zone_validation_failed",
                        "DNSKEY RRset is not signed by the DS-matched KSK")
         for (name, rdtype), rrset in zone.rrsets.items():

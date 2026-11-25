@@ -6,6 +6,8 @@ not fail an upload that has already been stored.
 
 from __future__ import annotations
 
+import socket
+
 import dns.flags
 import dns.message
 import dns.query
@@ -13,7 +15,7 @@ import dns.opcode
 import dns.rcode
 import dns.rdatatype
 
-from dns_host.config import NSD_PORT
+from dns_host.config import DNS_BIND, DNS_PORT, NSD_PORT
 from dns_host.logutil import log
 
 # NSD's allow-notify is 127.0.0.1 NOKEY. Fixed, not configuration.
@@ -25,6 +27,11 @@ class Notifier:
 
     def notify(self, zone: str, soa) -> bool:
         raise NotImplementedError
+
+    def master_ready(self) -> bool:
+        """True when a NOTIFY can be sent without a refused transfer."""
+
+        return True
 
 
 class RecordingNotifier(Notifier):
@@ -50,6 +57,17 @@ class UdpNotifier(Notifier):
         self.settings = settings
         self.store = store
         self.target = (NSD_NOTIFY_HOST, NSD_PORT)
+
+    def master_ready(self) -> bool:
+        """The AXFR listener must accept before NSD is told to transfer.
+
+        NSD connects as soon as it accepts the NOTIFY. A refused connection
+        on a zone it has never loaded is not tried again for about 20 to 40
+        seconds, so the NOTIFY stays queued until this port accepts. A
+        NOTIFY sent then starts the transfer at once.
+        """
+
+        return axfr_listener_open()
 
     def notify(self, zone: str, soa) -> bool:
         """Send one NOTIFY. True when NSD answered NOERROR."""
@@ -94,6 +112,24 @@ class UdpNotifier(Notifier):
             target=f"{host}@{port}",
             rcode=rcode)
         return True
+
+
+def axfr_listener_open(timeout: float = 0.2) -> bool:
+    """True when ``127.0.0.1:5353`` accepts a TCP connection."""
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((DNS_BIND, DNS_PORT))
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def _serial(soa) -> int | None:

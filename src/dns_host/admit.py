@@ -21,13 +21,14 @@ from dns_host.pipeline import (
 )
 from dns_host.zone import parse_upload
 
+# Only failures that depend on the parent alone are cached per apex. A DS or
+# NS set mismatch also depends on the uploaded zone, so a corrected upload
+# must be checked again rather than given the earlier answer.
 _PARENT_CACHE_ERRORS = {
     "parent_ns_incomplete",
     "parent_ds_missing",
-    "parent_ds_mismatch",
     "parent_chain_invalid",
     "parent_lookup_unavailable",
-    "ns_set_mismatch",
 }
 
 
@@ -60,7 +61,7 @@ def admit(body: dict, url_apex, settings, store, lookup, _notifier,
         lookup_started = time.perf_counter()
         try:
             delegation = parent_checks(zone, settings, lookup)
-            matched = ds_matches(zone, delegation, settings)
+            matched = ds_matches(zone, delegation, settings, lookup)
         except ApiError as exc:
             _remember_parent_failure(store, settings, url_apex.to_text(), exc)
             raise

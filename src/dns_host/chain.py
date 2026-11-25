@@ -30,7 +30,11 @@ from dns_host.doh import Lookup, LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.logutil import log
 from dns_host.names import normalise_name
-from dns_host.parent_ns import fetch_delegation_ns, harvest_lookup_glue
+from dns_host.parent_ns import (
+    fetch_delegation_ns,
+    harvest_lookup_glue,
+    query_parent_servers,
+)
 
 DS = dns.rdatatype.DS
 NS = dns.rdatatype.NS
@@ -48,6 +52,10 @@ class Delegation:
     ns_names: list
     ds_rrset: dns.rrset.RRset | None
     proved_ds_absent: bool
+    # Kept so the DS can be asked of the parent directly if it looks stale.
+    parent_keys: dns.rrset.RRset | None = None
+    parent_servers: list | None = None
+    glue: dict | None = None
 
 
 class _Budget:
@@ -241,6 +249,9 @@ def _walk_from_root(lookup,
                 ns_names=[rdata.target for rdata in ns_rrset],
                 ds_rrset=ds_rrset,
                 proved_ds_absent=proved_absent,
+                parent_keys=parent_keys,
+                parent_servers=list(parent_servers),
+                glue=glue,
             )
         if proved_absent:
             raise ApiError(
@@ -275,6 +286,50 @@ def _walk_from_root(lookup,
         parent_keys = child_dnskey
         parent_servers = [rdata.target.to_text() for rdata in auth_ns]
     raise ApiError(403, "parent_chain_invalid", f"walk did not reach {apex}")
+
+
+def direct_parent_ds(lookup, settings, apex, delegation: Delegation) -> list:
+    """DS rdatas for ``apex`` read from each parent nameserver with rd=0.
+
+    The resolver may still hold a DS RRset from before the parent changed
+    it, for up to the DS TTL. Each answer here must carry an RRSIG that
+    validates under the parent DNSKEY, or it is ignored. Returns the union
+    of the validated DS records. Transport failures give an empty list.
+    """
+
+    if delegation.parent_keys is None or not delegation.parent_servers:
+        return []
+    budget = _Budget(settings.max_doh_queries_per_walk)
+    now = settings.now()
+    found = []
+    try:
+        answers = query_parent_servers(lookup, settings, apex, "DS",
+                                       delegation.parent_servers,
+                                       delegation.glue, budget)
+    except LookupError as exc:
+        log("warning",
+            "direct parent DS lookup failed",
+            apex=apex.to_text(),
+            error=str(exc))
+        return []
+    for label, response in answers:
+        rrset, sigs = _extract(response, apex, "DS")
+        if rrset is None:
+            continue
+        try:
+            _verify(rrset, sigs, delegation.parent_zone,
+                    delegation.parent_keys, now, f"DS {apex}")
+        except ApiError as exc:
+            log("warning",
+                "direct parent DS did not validate",
+                apex=apex.to_text(),
+                server=label,
+                error=exc.message)
+            continue
+        for rdata in rrset:
+            if rdata not in found:
+                found.append(rdata)
+    return found
 
 
 def _cached_dnskey(lookup,
@@ -437,23 +492,65 @@ def _rrset_of(name, ttl, rdatas):
 
 def _keys_matching_ds(name, dnskey_rrset, ds_records, allowed_digests) -> list:
     matched = []
-    allowed = {int(item) for item in allowed_digests}
-    for ds in ds_records:
-        digest_type = int(ds.digest_type)
-        if digest_type not in allowed or digest_type not in _DIGEST_NAMES:
-            continue
+    for ds in _supported_ds(ds_records, allowed_digests):
         for key in dnskey_rrset:
-            if int(key.algorithm) != int(ds.algorithm):
-                continue
-            if int(dns.dnssec.key_id(key)) != int(ds.key_tag):
-                continue
-            if (int(key.flags) & 0x0101) != 0x0101:
-                continue
-            calculated = dns.dnssec.make_ds(name, key,
-                                            _DIGEST_NAMES[digest_type])
-            if calculated.digest == ds.digest:
+            if _key_matches_ds(name, key, ds) and key not in matched:
                 matched.append(key)
     return matched
+
+
+def _supported_ds(ds_records, allowed_digests) -> list:
+    """DS records whose digest type is allowed and known. Others are ignored."""
+
+    allowed = {int(item) for item in allowed_digests}
+    return [
+        ds for ds in ds_records if int(ds.digest_type) in allowed
+        and int(ds.digest_type) in _DIGEST_NAMES
+    ]
+
+
+def _key_matches_ds(name, key, ds) -> bool:
+    if int(key.algorithm) != int(ds.algorithm):
+        return False
+    if int(dns.dnssec.key_id(key)) != int(ds.key_tag):
+        return False
+    if (int(key.flags) & 0x0101) != 0x0101:
+        return False
+    # make_ds hashes the canonical (lowercase) owner wire form plus the rdata.
+    calculated = dns.dnssec.make_ds(name, key,
+                                    _DIGEST_NAMES[int(ds.digest_type)])
+    return calculated.digest == ds.digest
+
+
+def match_ds_by_algorithm(name, dnskey_rrset, ds_records,
+                          allowed_digests) -> tuple[list, list]:
+    """Match parent DS to the zone's KSKs, one algorithm at a time.
+
+    Returns the matched KSKs and the DS algorithms with no match. Every
+    algorithm in the supported DS set needs at least one DS that matches a
+    KSK of that algorithm (RFC 4035 section 2.2). Within an algorithm any
+    single match is enough, so a DS for a key already removed is allowed.
+    """
+
+    supported = _supported_ds(ds_records, allowed_digests)
+    keys = list(dnskey_rrset or [])
+    matched = []
+    unmatched = []
+    for algorithm in sorted({int(ds.algorithm) for ds in supported}):
+        found = False
+        for ds in supported:
+            if int(ds.algorithm) != algorithm:
+                continue
+            for key in keys:
+                if _key_matches_ds(name, key, ds):
+                    found = True
+                    if key not in matched:
+                        matched.append(key)
+        if not found:
+            unmatched.append(algorithm)
+    if not supported:
+        return [], []
+    return matched, unmatched
 
 
 def _is_nxdomain(response) -> bool:
