@@ -1,7 +1,10 @@
 #! /bin/sh
 
+zone="james.isthisyou.me"
+if test "$1"; then zone="$1"; fi
+
 time ./tools/zone_push.py \
-	--axfr-zone james.isthisyou.me \
+	--axfr-zone ${zone} \
 	--dns-server 127.0.0.8 \
 	--axfr-server 192.168.1.145 \
 	--axfr-port 53 \

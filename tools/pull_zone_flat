@@ -1,10 +1,13 @@
 #! /bin/sh
 
+zone="james.isthisyou.me"
+if test "$1"; then zone="$1"; fi
+
 tmp=$(mktemp)
-/usr/bin/dig @192.168.1.145 james.isthisyou.me axfr > ${tmp}
+/usr/bin/dig @192.168.1.145 ${zone} axfr > ${tmp}
 ./tools/zone_push.py \
 	--zone-file ${tmp}\
-	--apex james.isthisyou.me \
+	--apex ${zone} \
 	--axfr-server 192.168.1.145 \
 	--axfr-port 53 \
 	--base-url http://127.0.0.8/
