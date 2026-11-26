@@ -9,9 +9,10 @@ import dns.dnssec
 import dns.name
 import dns.rrset
 
-from dns_host.chain import authenticate_parent
+from dns_host.chain import TldMissingAtRoot, _tld_missing, authenticate_parent
 from dns_host.doh import LookupRR, LookupResponse
 from dns_host.dnskey_cache import get_process_cache
+from dns_host.errors import ApiError
 from dns_host.logutil import set_log_level
 from dns_host.zonesign import generate_key, sign_rrset
 
@@ -272,3 +273,133 @@ def test_handshake_tld_apex_asks_the_root_server_for_delegation(
     assert synthetic not in "".join(str(call["servers"]) for call in api.calls)
     assert any("retrying parent walk from handshake root" in line
                for line in syslog_lines)
+
+
+def test_tld_missing_is_the_exception_type_not_the_message():
+    same_words = ApiError(403, "parent_ds_missing",
+                          "webmail. does not exist under .")
+    other_words = TldMissingAtRoot(403, "parent_chain_invalid",
+                                   "parent served no delegation for webmail.")
+    assert _tld_missing(same_words) is False
+    assert _tld_missing(other_words) is True
+
+
+def test_icann_ds_nxdomain_starts_the_handshake_walk(env, syslog_lines):
+    """DS NXDOMAIN at the ICANN root starts the Handshake walk.
+
+    The NS answer is NOERROR with no delegation, so the ICANN error is
+    ``parent served no delegation`` and does not say the name does not
+    exist. The DS status alone is what selects the Handshake root.
+    """
+
+    set_log_level("info")
+    get_process_cache().clear()
+    now = env.settings.now()
+    inception, expiration = now - 120, now + 10 * 86400
+    root = dns.name.root
+    tld = dns.name.from_text("hnstld.")
+    apex = dns.name.from_text("example.hnstld.")
+    hs = "hs-root.example."
+    icann = ["a.root-servers.net.", "b.root-servers.net."]
+
+    icann_ksk_priv, icann_ksk = generate_key(257)
+    icann_zsk_priv, icann_zsk = generate_key(256)
+    hs_ksk_priv, hs_ksk = generate_key(257)
+    hs_zsk_priv, hs_zsk = generate_key(256)
+    tld_ksk_priv, tld_ksk = generate_key(257)
+    tld_zsk_priv, tld_zsk = generate_key(256)
+
+    def signed(rrset, private, dnskey, signer):
+        return _signed(rrset, private, dnskey, signer, inception, expiration)
+
+    icann_dnskey = dns.rrset.from_rdata(root, 300, icann_ksk, icann_zsk)
+    icann_ns = dns.rrset.from_text(root, 300, "IN", "NS", *icann)
+    hs_dnskey = dns.rrset.from_rdata(root, 300, hs_ksk, hs_zsk)
+    hs_ns = dns.rrset.from_text(root, 300, "IN", "NS",
+                                "synthetic-root.example.")
+    tld_ds = dns.rrset.from_rdata(tld, 300,
+                                  dns.dnssec.make_ds(tld, tld_ksk, "SHA256"))
+    tld_ns = dns.rrset.from_text(tld, 300, "IN", "NS", "ns1.outside.example.",
+                                 "ns2.outside.example.")
+    child_ns = dns.rrset.from_text(apex, 300, "IN", "NS",
+                                   "ns1.outside.example.",
+                                   "ns2.outside.example.")
+    tld_dnskey = dns.rrset.from_rdata(tld, 300, tld_ksk, tld_zsk)
+    child_ds = dns.rrset.from_rdata(
+        apex, 300, dns.dnssec.make_ds(apex, tld_ksk, "SHA256"))
+
+    def decide(call):
+        name, rdtype = call["name"], call["type"]
+        servers = call["servers"]
+        if servers == icann and name == "." and rdtype == "DNSKEY":
+            return LookupResponse(status=0,
+                                  answer=signed(icann_dnskey, icann_ksk_priv,
+                                                icann_ksk, root))
+        if servers == icann and name == "." and rdtype == "NS":
+            return LookupResponse(status=0,
+                                  answer=signed(icann_ns, icann_zsk_priv,
+                                                icann_zsk, root))
+        if servers == icann and name == "hnstld." and rdtype == "DS":
+            return LookupResponse(status=3)
+        if servers == icann and name == "hnstld." and rdtype == "NS":
+            return LookupResponse(status=0)
+        if servers == [hs] and name == "." and rdtype == "DNSKEY":
+            return LookupResponse(status=0,
+                                  answer=signed(hs_dnskey, hs_ksk_priv, hs_ksk,
+                                                root))
+        if servers == [hs] and name == "." and rdtype == "NS":
+            return LookupResponse(status=0,
+                                  answer=signed(hs_ns, hs_zsk_priv, hs_zsk,
+                                                root))
+        if servers == [hs] and name == "hnstld." and rdtype == "DS":
+            return LookupResponse(status=0,
+                                  answer=signed(tld_ds, hs_zsk_priv, hs_zsk,
+                                                root))
+        if servers == [hs] and name == "hnstld." and rdtype == "NS":
+            return LookupResponse(status=0, authority=_items(tld_ns))
+        if name == "hnstld." and rdtype == "DNSKEY" and call["rd"] == 1:
+            return LookupResponse(status=0,
+                                  answer=signed(tld_dnskey, tld_ksk_priv,
+                                                tld_ksk, tld))
+        if name == "hnstld." and rdtype == "NS" and call["rd"] == 1:
+            return LookupResponse(status=0,
+                                  answer=signed(tld_ns, tld_zsk_priv, tld_zsk,
+                                                tld))
+        if name == "example.hnstld." and rdtype == "DS" and call["rd"] == 1:
+            return LookupResponse(status=0,
+                                  answer=signed(child_ds, tld_zsk_priv,
+                                                tld_zsk, tld))
+        if (name == "example.hnstld." and rdtype == "NS" and servers
+                == ["ns1.outside.example.", "ns2.outside.example."]):
+            return LookupResponse(status=0, authority=_items(child_ns))
+        if servers is None and name == "." and rdtype == "NS":
+            return LookupResponse(status=0, answer=_items(icann_ns))
+        return LookupResponse(status=2)
+
+    api = Api(decide)
+    env.settings.trust_anchors = [
+        dns.dnssec.make_ds(root, icann_ksk, "SHA256")
+    ]
+    env.settings.handshake_root_servers = [dns.name.from_text(hs)]
+    env.settings.handshake_trust_anchors = [
+        dns.dnssec.make_ds(root, hs_ksk, "SHA256")
+    ]
+    delegation = authenticate_parent(api, env.settings, apex)
+    assert delegation.parent_zone == tld
+    icann_ds = [
+        call for call in api.calls if call["servers"] == icann
+        and call["name"] == "hnstld." and call["type"] == "DS"
+    ]
+    assert icann_ds
+    hs_ds = [
+        call for call in api.calls if call["servers"] == [hs]
+        and call["name"] == "hnstld." and call["type"] == "DS"
+    ]
+    assert hs_ds
+    logged = [
+        line for line in syslog_lines
+        if "retrying parent walk from handshake root" in line
+    ]
+    assert logged
+    assert "parent served no delegation" in logged[0]
+    assert "does not exist" not in logged[0]

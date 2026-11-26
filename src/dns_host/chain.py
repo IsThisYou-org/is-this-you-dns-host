@@ -116,8 +116,7 @@ def authenticate_parent(lookup: Lookup, settings,
                 budget=budget,
             )
         except ApiError as first:
-            if (first.error in {"parent_ds_missing", "parent_chain_invalid"}
-                    and settings.handshake_root_servers
+            if (settings.handshake_root_servers
                     and settings.handshake_trust_anchors
                     and _tld_missing(first)):
                 log("info",
@@ -146,11 +145,34 @@ def authenticate_parent(lookup: Lookup, settings,
         raise ApiError(503, "parent_lookup_unavailable", str(exc)) from exc
 
 
+class TldMissingAtRoot(ApiError):
+    """NXDOMAIN for a name directly under the root.
+
+    The status, error code, and message are whatever the walk was going to
+    return. The Handshake retry keys off this type, not the text.
+    """
+
+
 def _tld_missing(error: ApiError) -> bool:
-    # Only a proved absence of the name under the ICANN root is a reason to
-    # try the handshake root. A missing DS at a name that exists is the kill
-    # switch and must not fall through.
-    return "does not exist" in error.message.lower()
+    # Set only when the DS answer or the NS answer for a name under the
+    # root is NXDOMAIN. A missing DS at a name that exists stays a plain
+    # ApiError and must not fall through.
+    return isinstance(error, TldMissingAtRoot)
+
+
+def _cut_error(parent_zone,
+               responses,
+               status: int,
+               error: str,
+               message: str,
+               *,
+               proved: bool = False) -> ApiError:
+    """The zone-cut failure. Root NXDOMAIN is ``TldMissingAtRoot``."""
+
+    missing = parent_zone == dns.name.root and (proved or any(
+        _is_nxdomain(response) for response in responses))
+    kind = TldMissingAtRoot if missing else ApiError
+    return kind(status, error, message)
 
 
 def _walk_from_root(lookup,
@@ -218,45 +240,51 @@ def _walk_from_root(lookup,
         # The parent is asked with rd=0. A recursive query for this NS
         # follows the referral into the child, which is not served until
         # admission, and that SERVFAIL must not be reported as the answer.
+        # An NXDOMAIN here is the response, not an error from parent_ns.
         ns_rrset, ns_response = fetch_delegation_ns(lookup, settings, child,
                                                     ns_servers, budget)
-        if _proved_nxdomain(child, ns_response, parent_zone,
-                            parent_keys, now) or _proved_nxdomain(
-                                child, ds_response, parent_zone, parent_keys,
-                                now):
-            raise ApiError(
+        denial = (ns_response, ds_response)
+        proved_missing = _proved_nxdomain(
+            child, ns_response,
+            parent_zone, parent_keys, now) or _proved_nxdomain(
+                child, ds_response, parent_zone, parent_keys, now)
+        if proved_missing:
+            raise _cut_error(
+                parent_zone,
+                denial,
                 403,
                 "parent_ds_missing",
                 f"{child} does not exist under {parent_zone}",
+                proved=True,
             )
         if _is_nxdomain(ds_response) and _is_nxdomain(ns_response):
-            raise ApiError(403, "parent_chain_invalid",
-                           f"unauthenticated NXDOMAIN for {child}")
+            raise _cut_error(parent_zone, denial, 403, "parent_chain_invalid",
+                             f"unauthenticated NXDOMAIN for {child}")
         if ns_rrset is None:
             if not is_target and (_proved_nodata(
                     child, NS, ns_response, parent_zone, parent_keys,
                     now) or _proved_nodata(child, NS, ds_response, parent_zone,
                                            parent_keys, now)):
                 continue
-            raise ApiError(
-                403,
-                "parent_chain_invalid",
-                f"parent served no delegation for {child}",
-            )
+            raise _cut_error(parent_zone, denial, 403, "parent_chain_invalid",
+                             f"parent served no delegation for {child}")
         proved_absent = False
         if ds_rrset is None:
             proved_absent = _proved_nodata(child, DS, ds_response, parent_zone,
                                            parent_keys, now)
             if not proved_absent:
-                raise ApiError(
+                raise _cut_error(
+                    parent_zone,
+                    denial,
                     403,
                     "parent_chain_invalid",
                     f"DS for {child} was not returned and its absence was not authenticated",
                 )
         else:
             if ds_sigs is None:
-                raise ApiError(403, "parent_chain_invalid",
-                               f"DS for {child} has no RRSIG")
+                raise _cut_error(parent_zone, denial, 403,
+                                 "parent_chain_invalid",
+                                 f"DS for {child} has no RRSIG")
             _verify(ds_rrset, ds_sigs, parent_zone, parent_keys, now,
                     f"DS {child}")
         if is_target:

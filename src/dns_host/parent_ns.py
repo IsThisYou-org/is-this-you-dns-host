@@ -31,8 +31,10 @@ def fetch_delegation_ns(lookup, settings, child, parent_servers, budget):
 
     Raises ``ApiError`` 503 when no parent pair gives a NOERROR or
     NXDOMAIN answer. A response with no NS RRset is returned so the walk
-    can still authenticate a denial. ``LookupError`` from ``budget`` is
-    left to the caller.
+    can still authenticate a denial. An NXDOMAIN is that response, not an
+    error raised here: the walk marks a root-cut NXDOMAIN, from this NS
+    answer or from the DS answer, as ``TldMissingAtRoot``. ``LookupError``
+    from ``budget`` is left to the caller.
 
     An in-memory lookup may implement ``answer_delegation(child,
     parent_servers)`` and skip the API. The production client does not.
