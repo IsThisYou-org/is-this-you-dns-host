@@ -89,9 +89,14 @@ class Lab:
             *[name.to_text() for name in self.root_ns])
         root_ns_sig = self._sig(root_ns, self.root_zsk_priv, self.root_zsk,
                                 self.root)
-        # Root DNSKEY and NS: rd=0 against the resolver's local root copy.
+        # The walk learns the root names from the local copy (no server),
+        # then reads the signed root from those names via servers=.
         self._put(self.root, "DNSKEY", None, root_dnskey, root_dnskey_sig)
         self._put(self.root, "NS", None, root_ns, root_ns_sig)
+        for server in self.root_ns:
+            self._put(self.root, "DNSKEY", server, root_dnskey,
+                      root_dnskey_sig)
+            self._put(self.root, "NS", server, root_ns, root_ns_sig)
 
         parent_ds = dns.rrset.from_rdata(
             self.parent, ttl,
@@ -239,16 +244,31 @@ class Lab:
         })
         return self.direct.get((name.to_text(), rdtype))
 
-    def query(self, name, rdtype, *, server=None, rd=0, do=1, cd=None):
+    def query(self,
+              name,
+              rdtype,
+              *,
+              server=None,
+              servers=None,
+              rd=0,
+              do=1,
+              cd=None):
         record = {
             "name": name,
             "type": rdtype,
             "server": server,
+            "servers": list(servers) if servers else None,
             "rd": rd,
             "do": do,
             "cd": cd,
         }
         self.calls.append(record)
+        if servers:
+            for candidate in servers:
+                found = self.responses.get(_key(name, rdtype, candidate))
+                if found is not None:
+                    return found
+            return LookupResponse(status=2)
         found = self.responses.get(_key(name, rdtype, server))
         if found is None:
             return LookupResponse(status=2)
