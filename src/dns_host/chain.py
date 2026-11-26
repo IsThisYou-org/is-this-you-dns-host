@@ -1,14 +1,16 @@
 """Walk and validate a DNSSEC chain from a configured trust anchor to the parent DS.
 
 The AD bit on the resolver response is ignored. Every RRset signature is
-checked locally. One walk reads every root-zone RRset from one set of
-servers, with ``rd=0`` and ``servers=`` (a comma-separated pair). The ICANN
-walk learns that set from the resolver's local root NS, then uses it for the
-root DNSKEY, the root NS, the TLD DS, and the TLD delegation NS. The
-Handshake walk uses ``handshake_root_servers`` for all four. ``server=`` is
-not used: the API answers that parameter from its merged local root, which
-mixes Handshake into an ICANN walk. Below the root, DNSKEY and DS use
-``rd=1`` and do not pass a server. ``cd`` follows ``settings.doh_cd``.
+checked locally. The ICANN walk reads every root-zone RRset from one set
+of servers, with ``rd=0`` and ``servers=`` (a comma-separated pair). It
+learns that set from the resolver's local root NS, then uses it for the
+root DNSKEY, the root NS, the TLD DS, and the TLD delegation NS.
+``server=`` is not used: the API answers that parameter from its merged
+local root. When the ICANN root returns NXDOMAIN for the TLD, the TLD DS
+and NS are read again with ``rd=0`` and no server. Those two RRsets are
+the Handshake anchor and are not checked against a root DNSKEY. Below
+that TLD, and below the ICANN root, DNSKEY and DS use ``rd=1`` and do not
+pass a server. ``cd`` follows ``settings.doh_cd``.
 
 Delegation NS are not taken from a recursive lookup. Each zone cut is
 asked through the resolver API with ``rd=0`` and ``servers=`` set to a
@@ -116,30 +118,9 @@ def authenticate_parent(lookup: Lookup, settings,
                 budget=budget,
             )
         except ApiError as first:
-            if (settings.handshake_root_servers
-                    and settings.handshake_trust_anchors
-                    and _tld_missing(first)):
-                log("info",
-                    "retrying parent walk from handshake root",
-                    apex=apex.to_text(),
-                    reason=first.message,
-                    servers=",".join(
-                        name.to_text()
-                        for name in settings.handshake_root_servers))
-                return _walk_from_root(
-                    capped,
-                    settings,
-                    apex,
-                    now,
-                    anchors=settings.handshake_trust_anchors,
-                    root_servers=[
-                        name.to_text()
-                        for name in settings.handshake_root_servers
-                    ],
-                    cache=cache,
-                    root_id="handshake",
-                    budget=budget,
-                )
+            if _tld_missing(first):
+                return _handshake_from_tld(capped, settings, apex, now, first,
+                                           cache, budget)
             raise
     except LookupError as exc:
         raise ApiError(503, "parent_lookup_unavailable", str(exc)) from exc
@@ -149,8 +130,14 @@ class TldMissingAtRoot(ApiError):
     """NXDOMAIN for a name directly under the root.
 
     The status, error code, and message are whatever the walk was going to
-    return. The Handshake retry keys off this type, not the text.
+    return. The Handshake retry keys off this type, not the text. ``name``
+    is that TLD.
     """
+
+    def __init__(self, status: int, error: str, message: str,
+                 name: dns.name.Name):
+        super().__init__(status, error, message)
+        self.name = name
 
 
 def _tld_missing(error: ApiError) -> bool:
@@ -165,14 +152,16 @@ def _cut_error(parent_zone,
                status: int,
                error: str,
                message: str,
+               name: dns.name.Name,
                *,
                proved: bool = False) -> ApiError:
     """The zone-cut failure. Root NXDOMAIN is ``TldMissingAtRoot``."""
 
     missing = parent_zone == dns.name.root and (proved or any(
         _is_nxdomain(response) for response in responses))
-    kind = TldMissingAtRoot if missing else ApiError
-    return kind(status, error, message)
+    if missing:
+        return TldMissingAtRoot(status, error, message, name)
+    return ApiError(status, error, message)
 
 
 def _walk_from_root(lookup,
@@ -186,9 +175,9 @@ def _walk_from_root(lookup,
                     budget=None) -> Delegation:
     if budget is None:
         budget = _Budget(settings.max_doh_queries_per_walk)
-    # One walk, one source. ICANN learns the root names from the local
-    # copy, then reads the root and the TLD from those servers. Handshake
-    # reads the root and the TLD from handshake_root_servers.
+    # One ICANN walk, one source. The root names come from the local copy,
+    # then the root and the TLD are read from those servers. ``root_servers``
+    # replaces that learned list when the caller already has one.
     if root_servers:
         zone_servers = list(root_servers)
     else:
@@ -215,12 +204,156 @@ def _walk_from_root(lookup,
         raise ApiError(503, "parent_lookup_unavailable",
                        "root NS was not returned")
     _verify(ns_rrset, ns_sigs, dns.name.root, dnskey, now, "root NS")
-    parent_zone = dns.name.root
-    parent_keys = dnskey
-    parent_servers = list(zone_servers)
+    return _descend(
+        lookup,
+        settings,
+        apex,
+        now,
+        parent_zone=dns.name.root,
+        parent_keys=dnskey,
+        parent_servers=list(zone_servers),
+        zone_servers=list(zone_servers),
+        cache=cache,
+        root_id=root_id,
+        budget=budget,
+    )
+
+
+def _handshake_from_tld(lookup, settings, apex, now, icann: TldMissingAtRoot,
+                        cache, budget) -> Delegation:
+    """Trust the TLD DS and NS from the API's local root, then walk down.
+
+    ``rd=0`` with no server is the merged local root. For a Handshake TLD
+    that answer is the Handshake node's own data. The two RRsets are the
+    anchor: a signature is ignored, and a missing one is not required.
+    Another NXDOMAIN keeps the ICANN error. From the TLD DNSKEY downward
+    the checks are the ordinary ones.
+    """
+
+    tld = icann.name
+    ds_rrset, ds_response = _query_no_server(lookup, settings, tld, "DS")
+    ns_rrset, ns_response = _query_no_server(lookup, settings, tld, "NS")
+    log(
+        "info",
+        "handshake fallback",
+        apex=apex.to_text(),
+        tld=tld.to_text(),
+        reason=icann.message,
+        responder=_responders(ds_response, ns_response),
+    )
+    if _is_nxdomain(ds_response) or _is_nxdomain(ns_response):
+        raise icann
+    if ns_rrset is None:
+        raise ApiError(403, "parent_chain_invalid",
+                       f"parent served no delegation for {tld}")
+    if ds_rrset is None:
+        raise ApiError(
+            403,
+            "parent_chain_invalid",
+            f"DS for {tld} was not returned and its absence was not authenticated",
+        )
+    if apex == tld:
+        return Delegation(
+            parent_zone=dns.name.root,
+            ns_names=[rdata.target for rdata in ns_rrset],
+            ds_rrset=ds_rrset,
+            proved_ds_absent=False,
+            parent_keys=None,
+            parent_servers=None,
+        )
+    child_servers = [rdata.target.to_text() for rdata in ns_rrset]
+    child_dnskey, _child_dnskey_sigs = _cached_dnskey(
+        lookup,
+        settings,
+        tld,
+        child_servers,
+        list(ds_rrset),
+        now,
+        f"DNSKEY {tld}",
+        cache,
+        "handshake",
+    )
+    auth_ns, auth_ns_sigs = _query_type(lookup, settings, tld, "NS",
+                                        child_servers)
+    if auth_ns is None or auth_ns_sigs is None:
+        raise ApiError(503, "parent_lookup_unavailable",
+                       f"authoritative NS for {tld} was not returned")
+    _verify(auth_ns, auth_ns_sigs, tld, child_dnskey, now, f"NS {tld}")
+    return _descend(
+        lookup,
+        settings,
+        apex,
+        now,
+        parent_zone=tld,
+        parent_keys=child_dnskey,
+        parent_servers=[rdata.target.to_text() for rdata in auth_ns],
+        zone_servers=[],
+        cache=cache,
+        root_id="handshake",
+        budget=budget,
+        start_below=tld,
+    )
+
+
+def _responders(*responses) -> str | None:
+    found = []
+    for response in responses:
+        responder = getattr(response, "responder", None)
+        if responder and responder not in found:
+            found.append(responder)
+    return ", ".join(found) or None
+
+
+def _query_no_server(lookup, settings, name, rdtype: str):
+    """One ``rd=0`` query with neither ``server`` nor ``servers``."""
+
+    qname = name if isinstance(name, dns.name.Name) else normalise_name(
+        str(name), allow_root=True)
+    try:
+        response = lookup.query(qname.to_text(),
+                                rdtype,
+                                rd=0,
+                                do=1,
+                                cd=settings.doh_cd)
+    except LookupError as exc:
+        log(
+            "warning",
+            "parent lookup failed",
+            name=qname.to_text(),
+            rdtype=rdtype,
+            error=str(exc),
+        )
+        raise
+    if int(response.status) not in (0, 3):
+        raise ApiError(
+            503,
+            "parent_lookup_unavailable",
+            f"{rdtype} lookup for {qname.to_text()} failed: status {response.status}",
+        )
+    rrset, _sigs = _extract(response, qname, rdtype)
+    return rrset, response
+
+
+def _descend(
+    lookup,
+    settings,
+    apex,
+    now,
+    parent_zone,
+    parent_keys,
+    parent_servers,
+    zone_servers,
+    cache,
+    root_id,
+    budget,
+    start_below=None,
+) -> Delegation:
     labels = apex.labels[:-1]
     for depth in range(len(labels), 0, -1):
         child = dns.name.Name(labels[depth - 1:] + (b"", ))
+        if start_below is not None and (child == start_below or
+                                        not start_below.is_superdomain(child)):
+            continue
         is_target = child == apex
         # TLD DS and TLD delegation NS are both root-zone data, so both
         # use this walk's server set. Below the root, ask the parent zone's
@@ -255,11 +388,12 @@ def _walk_from_root(lookup,
                 403,
                 "parent_ds_missing",
                 f"{child} does not exist under {parent_zone}",
+                child,
                 proved=True,
             )
         if _is_nxdomain(ds_response) and _is_nxdomain(ns_response):
             raise _cut_error(parent_zone, denial, 403, "parent_chain_invalid",
-                             f"unauthenticated NXDOMAIN for {child}")
+                             f"unauthenticated NXDOMAIN for {child}", child)
         if ns_rrset is None:
             if not is_target and (_proved_nodata(
                     child, NS, ns_response, parent_zone, parent_keys,
@@ -267,7 +401,7 @@ def _walk_from_root(lookup,
                                            parent_keys, now)):
                 continue
             raise _cut_error(parent_zone, denial, 403, "parent_chain_invalid",
-                             f"parent served no delegation for {child}")
+                             f"parent served no delegation for {child}", child)
         proved_absent = False
         if ds_rrset is None:
             proved_absent = _proved_nodata(child, DS, ds_response, parent_zone,
@@ -279,12 +413,13 @@ def _walk_from_root(lookup,
                     403,
                     "parent_chain_invalid",
                     f"DS for {child} was not returned and its absence was not authenticated",
+                    child,
                 )
         else:
             if ds_sigs is None:
                 raise _cut_error(parent_zone, denial, 403,
                                  "parent_chain_invalid",
-                                 f"DS for {child} has no RRSIG")
+                                 f"DS for {child} has no RRSIG", child)
             _verify(ds_rrset, ds_sigs, parent_zone, parent_keys, now,
                     f"DS {child}")
         if is_target:
@@ -414,8 +549,8 @@ def _cached_dnskey(lookup, settings, name, servers, ds_records, now, what,
 def _root_zone_query(name, rdtype: str) -> bool:
     """True when ``rdtype`` at ``name`` is served from the root zone.
 
-    The resolver can answer those with ``rd=0`` from its local root copy, or
-    from a Handshake root server. Anything else is a referral when ``rd=0``.
+    The ICANN walk reads those with ``rd=0`` and ``servers=``. Anything
+    else is a referral when ``rd=0``.
     """
 
     qname = name if isinstance(name, dns.name.Name) else normalise_name(

@@ -238,7 +238,7 @@ def test_tld_dnskey_query_uses_rd1_without_server(env):
     assert all(call["cd"] == env.settings.doh_cd for call in resolver)
 
 
-def test_handshake_root_data_uses_rd0_at_the_handshake_server(env):
+def test_explicit_root_servers_are_used_for_root_zone_data(env):
     server = "hs-root.example."
     for rdtype in ("DNSKEY", "NS"):
         env.lab.responses[(".", rdtype,

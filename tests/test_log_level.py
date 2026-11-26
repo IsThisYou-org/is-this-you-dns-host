@@ -20,7 +20,7 @@ _ROUTINE = {
     "zone rejected",
     "rate limited",
     "NOTIFY sent",
-    "retrying parent walk from handshake root",
+    "handshake fallback",
     "zone installed from spool",
 }
 
