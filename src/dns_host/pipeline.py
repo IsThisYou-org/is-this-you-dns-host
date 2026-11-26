@@ -269,6 +269,11 @@ def check_apex_ns(zone: ParsedZone, settings) -> None:
 
 
 def check_glue(zone: ParsedZone) -> None:
+    # A one-label apex is a TLD. Glue for an in-bailiwick nameserver is
+    # published at the parent root, so the zone does not have to carry it.
+    # The resolver API resolves those hostnames.
+    if len(zone.apex) <= 2:
+        return
     for target in zone.apex_ns_names():
         if target != zone.apex and not target.is_subdomain(zone.apex):
             continue
@@ -322,8 +327,10 @@ def ds_matches(zone: ParsedZone,
                                                ds_records)
     if (not matched or unmatched) and lookup is not None:
         # The resolver can hold the DS RRset from before the parent last
-        # changed it. Ask the parent's own nameservers before rejecting.
-        direct = direct_parent_ds(lookup, settings, zone.apex, delegation)
+        # changed it. Ask the parent names through the resolver API before
+        # rejecting. Hostnames are passed through; the API resolves them.
+        direct, responder = direct_parent_ds(lookup, settings, zone.apex,
+                                             delegation)
         fresh = ds_records + [ds for ds in direct if ds not in ds_records]
         if len(fresh) > len(ds_records):
             ds_records = fresh
@@ -334,7 +341,8 @@ def ds_matches(zone: ParsedZone,
                 log("info",
                     "parent DS taken from the parent nameservers",
                     apex=zone.apex.to_text(),
-                    ds=_ds_tags(ds_records))
+                    ds=_ds_tags(ds_records),
+                    responder=responder)
     if not matched or unmatched:
         detail = ""
         if matched and unmatched:

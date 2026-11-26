@@ -4,8 +4,10 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from urllib.parse import parse_qs, urlsplit
+
 from dns_host.app import create_app
-from dns_host.doh import DohClient
+from dns_host.doh import DohClient, parse_doh_json
 from dns_host.storage import Store
 
 
@@ -13,6 +15,7 @@ def test_client_sends_only_documented_parameters(lab):
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
+
         def do_GET(self):
             seen.append(self.path)
             body = json.dumps({"Status": 2, "Answer": []}).encode()
@@ -31,7 +34,12 @@ def test_client_sends_only_documented_parameters(lab):
     try:
         port = server.server_address[1]
         client = DohClient(f"http://127.0.0.1:{port}/", timeout=2)
-        client.query("Example.COM", "DS", server="ns1.parent.example.", rd=0, do=1, cd=1)
+        client.query("Example.COM",
+                     "DS",
+                     server="ns1.parent.example.",
+                     rd=0,
+                     do=1,
+                     cd=1)
     finally:
         server.shutdown()
     assert seen
@@ -43,14 +51,66 @@ def test_client_sends_only_documented_parameters(lab):
     assert "rd=0" in path
     assert "cd=1" in path
     assert "server=ns1.parent.example." in path
-    keys = set(part.split("=", 1)[0] for part in path.split("?", 1)[1].split("&"))
-    assert keys <= {"name", "type", "do", "rd", "cd", "server"}
+    keys = set(
+        part.split("=", 1)[0] for part in path.split("?", 1)[1].split("&"))
+    assert keys <= {"name", "type", "do", "rd", "cd", "server", "servers"}
+
+
+def test_servers_is_a_comma_separated_pair_and_responder_is_optional():
+    assert parse_doh_json({"Status": 0}).responder is None
+    assert parse_doh_json({"Status": 0, "Responder": "  "}).responder is None
+    assert parse_doh_json({
+        "Status": 0,
+        "Responder": "216.239.32.10"
+    }).responder == "216.239.32.10"
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+
+        def do_GET(self):
+            seen.append(self.path)
+            body = json.dumps({
+                "Status": 0,
+                "Responder": "216.239.32.10"
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/dns-json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _fmt, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        client = DohClient(f"http://127.0.0.1:{port}/", timeout=2)
+        got = client.query(
+            "example.",
+            "DS",
+            servers=["ns1.example", "192.0.2.53", "2001:db8::53"],
+            rd=0,
+            do=1,
+        )
+    finally:
+        server.shutdown()
+    assert got.responder == "216.239.32.10"
+    query = parse_qs(urlsplit("http://127.0.0.1" + seen[0]).query)
+    assert query["name"] == ["example."]
+    assert query["rd"] == ["0"]
+    assert query["do"] == ["1"]
+    assert query["servers"] == ["ns1.example.,192.0.2.53,2001:db8::53"]
+    assert "server" not in query
 
 
 def test_resolver_base_url_override_is_used(env, tmp_path):
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
+
         def do_GET(self):
             seen.append(self.path)
             body = json.dumps({"Status": 2}).encode()
@@ -71,13 +131,19 @@ def test_resolver_base_url_override_is_used(env, tmp_path):
         env.settings.resolver_base_url = f"http://127.0.0.1:{port}/"
         store = Store(tmp_path / "other.db")
         store.ensure_catalog(env.clock.t)
-        app = create_app(env.settings, lookup=None, store=store, notifier=env.notifier)
+        app = create_app(env.settings,
+                         lookup=None,
+                         store=store,
+                         notifier=env.notifier)
         client = app.test_client()
         body = env.lab.zone()
         response = client.post(
             "/v1/zones/user.example",
             data=json.dumps(body),
-            headers={"Content-Type": "application/json", "X-Real-IP": "203.0.113.9"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Real-IP": "203.0.113.9"
+            },
         )
     finally:
         server.shutdown()
@@ -87,5 +153,6 @@ def test_resolver_base_url_override_is_used(env, tmp_path):
     assert all("do=1" in path and "rd=0" in path for path in seen)
     assert all("web3dns.net" not in path for path in seen)
     for path in seen:
-        keys = set(part.split("=", 1)[0] for part in path.split("?", 1)[1].split("&"))
-        assert keys <= {"name", "type", "do", "rd", "cd", "server"}
+        keys = set(
+            part.split("=", 1)[0] for part in path.split("?", 1)[1].split("&"))
+        assert keys <= {"name", "type", "do", "rd", "cd", "server", "servers"}

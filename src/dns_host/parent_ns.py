@@ -2,10 +2,10 @@
 
 A recursive lookup for the child NS follows the referral into the child.
 That zone is not served until admission, so the resolver returns SERVFAIL.
-The SERVFAIL is not a parent answer. Ask the parent over DNS instead
-(UDP port 53, TCP when the UDP answer is truncated) with the recursion
-bit clear, and read the NS RRset from the referral AUTHORITY section, or
-from ANSWER when the parent is also authoritative for the child.
+The SERVFAIL is not a parent answer. Ask the resolver API instead, with
+``rd=0`` and ``servers=`` set to a pair of parent names or addresses. The
+API asks that pair and returns the fastest answer. A failed pair is
+followed by the next pair.
 
 Delegation NS records are unsigned. The DS, fetched through the resolver
 and checked against the parent DNSKEY, is what proves the chain.
@@ -15,71 +15,57 @@ from __future__ import annotations
 
 import ipaddress
 
-import dns.flags
-import dns.message
 import dns.name
-import dns.query
 import dns.rcode
-import dns.rdatatype
+import dns.rrset
 
-from dns_host.doh import LookupRR, LookupResponse
+from dns_host.doh import LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.names import normalise_name
 
 _DEFINITIVE = {0, 3}
 
 
-def fetch_delegation_ns(lookup, settings, child, parent_servers, glue, budget):
+def fetch_delegation_ns(lookup, settings, child, parent_servers, budget):
     """Return ``(ns_rrset_or_none, response)`` for ``child``.
 
-    Raises ``ApiError`` 503 when no parent nameserver gives a NOERROR or
+    Raises ``ApiError`` 503 when no parent pair gives a NOERROR or
     NXDOMAIN answer. A response with no NS RRset is returned so the walk
     can still authenticate a denial. ``LookupError`` from ``budget`` is
     left to the caller.
 
     An in-memory lookup may implement ``answer_delegation(child,
-    parent_servers)`` and skip the network. The production client does not.
+    parent_servers)`` and skip the API. The production client does not.
     """
 
+    del settings
     hook = _answer_delegation(lookup)
     if hook is not None:
         return hook(child, parent_servers)
-    if glue is None:
-        glue = {}
     child_name = _as_name(child)
-    timeout = _timeout(settings)
+    names = _server_names(parent_servers)
     transport_errors = []
     rcode_errors = []
     definitive = None
-    for server in parent_servers or []:
+    if not names:
+        transport_errors.append("no parent nameservers")
+    for pair in _pairs(names):
+        label = ",".join(pair)
+        budget.charge()
         try:
-            server_name = _as_name(server)
-        except Exception:
-            transport_errors.append(f"{server}: not a DNS name")
+            response = _ask(lookup, budget, child_name, "NS", pair, do=0)
+        except LookupError as exc:
+            transport_errors.append(f"{label}: {exc}")
             continue
-        label = server_name.to_text()
-        addresses = _addresses(lookup, server_name, glue)
-        if not addresses:
-            transport_errors.append(f"{label}: no address")
+        rcode = int(response.status)
+        if rcode not in _DEFINITIVE:
+            rcode_errors.append(f"{label}: rcode {dns.rcode.to_text(rcode)}")
             continue
-        for address in addresses:
-            try:
-                message = _exchange(address, child_name, timeout, budget)
-            except _Transport as exc:
-                transport_errors.append(f"{label} {address}: {exc}")
-                continue
-            rcode = int(message.rcode())
-            if rcode not in _DEFINITIVE:
-                rcode_errors.append(
-                    f"{label} {address}: rcode {dns.rcode.to_text(rcode)}")
-                continue
-            _harvest_message(message, glue)
-            response = message_to_lookup(message)
-            ns_rrset = _ns_rrset(message, child_name)
-            if ns_rrset is not None:
-                return ns_rrset, response
-            if definitive is None:
-                definitive = (None, response)
+        ns_rrset = _ns_rrset(response, child_name)
+        if ns_rrset is not None:
+            return ns_rrset, response
+        if definitive is None:
+            definitive = (None, response)
     if definitive is not None:
         return definitive
     reached = bool(rcode_errors)
@@ -89,48 +75,42 @@ def fetch_delegation_ns(lookup, settings, child, parent_servers, glue, budget):
     raise delegation_lookup_error(child_name, reached, errors)
 
 
-def query_parent_servers(lookup, settings, qname, rdtype: str, servers, glue,
+def query_parent_servers(lookup, settings, qname, rdtype: str, servers,
                          budget) -> list:
-    """Ask every parent nameserver for ``qname``/``rdtype`` with DO set.
+    """Ask the resolver API for ``qname``/``rdtype`` at the parent servers.
 
-    Returns ``(label, LookupResponse)`` for each NOERROR answer. A server
-    that does not answer is skipped. This bypasses resolver caches, so a
-    record the parent has just published is seen at once. An in-memory
-    lookup may implement ``answer_direct(qname, rdtype, server)``.
+    Nameservers are sent two at a time in ``servers=``. Each NOERROR answer
+    is returned as ``(label, LookupResponse)``. A pair that does not answer
+    is skipped. ``do=1`` so the DS RRSIG is present. An in-memory lookup
+    may implement ``answer_direct(qname, rdtype, server)``.
     """
 
+    del settings
     hook = _find_hook(lookup, "answer_direct")
     name = _as_name(qname)
-    if glue is None:
-        glue = {}
-    timeout = _timeout(settings)
-    answers = []
-    for server in servers or []:
-        try:
-            server_name = _as_name(server)
-        except Exception:
-            continue
-        label = server_name.to_text()
-        if hook is not None:
+    if hook is not None:
+        answers = []
+        for server in servers or []:
+            try:
+                label = _as_name(server).to_text()
+            except Exception:
+                continue
             budget.charge()
             response = hook(name, rdtype, label)
             if response is not None and int(response.status) == 0:
                 answers.append((label, response))
+        return answers
+    answers = []
+    for pair in _pairs(_server_names(servers)):
+        label = ",".join(pair)
+        budget.charge()
+        try:
+            response = _ask(lookup, budget, name, rdtype, pair, do=1)
+        except LookupError:
             continue
-        for address in _addresses(lookup, server_name, glue):
-            try:
-                message = _exchange(address,
-                                    name,
-                                    timeout,
-                                    budget,
-                                    rdtype=dns.rdatatype.from_text(rdtype),
-                                    dnssec=True)
-            except _Transport:
-                continue
-            if int(message.rcode()) != 0:
-                continue
-            answers.append((f"{label} {address}", message_to_lookup(message)))
-            break
+        if int(response.status) != 0:
+            continue
+        answers.append((label, response))
     return answers
 
 
@@ -151,36 +131,73 @@ def delegation_lookup_error(child, reached: bool, errors: list) -> ApiError:
     return ApiError(503, "parent_lookup_unavailable", message)
 
 
-def message_to_lookup(message) -> LookupResponse:
-    """Adapt a DNS message to the resolver response the denial checks read."""
+def _ask(lookup, budget, qname, rdtype: str, pair: list[str], *, do: int):
+    """One API call. The caller charges ``budget`` before this returns."""
 
-    return LookupResponse(
-        status=int(message.rcode()),
-        answer=_section(message.answer),
-        authority=_section(message.authority),
-        additional=_section(message.additional),
-        aa=bool(int(message.flags) & int(dns.flags.AA)),
-    )
+    client = _client(lookup, budget)
+    text = qname.to_text() if isinstance(qname, dns.name.Name) else str(qname)
+    return client.query(text, rdtype, servers=pair, rd=0, do=do)
 
 
-def harvest_lookup_glue(response, glue: dict) -> None:
-    """Remember A and AAAA addresses carried on a resolver response."""
+def _client(lookup, budget):
+    """Skip a budget wrapper that would charge this same budget again."""
 
-    if response is None or glue is None:
-        return
-    for item in list(response.additional or []) + list(response.answer or []):
-        if str(getattr(item, "rdtype", "")).upper() not in {"A", "AAAA"}:
-            continue
-        try:
-            rdata = item.to_rdata()
-            owner = normalise_name(item.name, allow_root=True)
-        except Exception:
-            continue
-        _remember(glue, owner, getattr(rdata, "address", None))
+    client = lookup
+    while getattr(client, "budget", None) is budget and getattr(
+            client, "inner", None) is not None:
+        client = client.inner
+    return client
 
 
-class _Transport(Exception):
-    pass
+def _pairs(names: list[str]):
+    for start in range(0, len(names), 2):
+        yield names[start:start + 2]
+
+
+def _server_names(servers) -> list[str]:
+    names = []
+    for server in servers or []:
+        if isinstance(server, dns.name.Name):
+            text = server.to_text()
+        else:
+            text = str(server).strip()
+            if not text:
+                continue
+            if not _is_ip(text) and not text.endswith("."):
+                text += "."
+        if text:
+            names.append(text)
+    return names
+
+
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _ns_rrset(response: LookupResponse, qname: dns.name.Name):
+    owner = qname.canonicalize()
+    for section in (response.answer, response.authority):
+        rdatas = []
+        ttl = 300
+        for item in section or []:
+            if str(getattr(item, "rdtype", "")).upper() != "NS":
+                continue
+            try:
+                name = normalise_name(item.name, allow_root=True)
+                rdata = item.to_rdata()
+            except Exception:
+                continue
+            if name.canonicalize() != owner:
+                continue
+            ttl = int(item.ttl or ttl)
+            rdatas.append(rdata)
+        if rdatas:
+            return dns.rrset.from_rdata(qname, ttl, *rdatas)
+    return None
 
 
 def _answer_delegation(lookup):
@@ -199,115 +216,6 @@ def _find_hook(lookup, attribute: str):
     return None
 
 
-def _exchange(address: str,
-              qname,
-              timeout: float,
-              budget,
-              rdtype=dns.rdatatype.NS,
-              dnssec: bool = False):
-    query = dns.message.make_query(qname, rdtype, flags=0, want_dnssec=dnssec)
-    budget.charge()
-    try:
-        response = dns.query.udp(query, address, timeout=timeout, port=53)
-    except Exception as exc:
-        raise _Transport(_failure_text(exc)) from exc
-    if int(response.flags) & int(dns.flags.TC):
-        budget.charge()
-        try:
-            response = dns.query.tcp(query, address, timeout=timeout, port=53)
-        except Exception as exc:
-            raise _Transport(_failure_text(exc)) from exc
-    return response
-
-
-def _addresses(lookup, server_name, glue) -> list:
-    key = server_name.canonicalize()
-    glued = []
-    for item in glue.get(key, ()):
-        ip = _ip_text(item)
-        if ip and ip not in glued:
-            glued.append(ip)
-    if glued:
-        return glued
-    resolved = _resolve(lookup, server_name)
-    if resolved:
-        glue[key] = list(resolved)
-    return resolved
-
-
-def _resolve(lookup, server_name) -> list:
-    found = []
-    qname = server_name.to_text()
-    for rdtype in ("A", "AAAA"):
-        response = lookup.query(qname, rdtype, rd=1, do=0)
-        if response is None or int(response.status) != 0:
-            continue
-        for item in response.answer or []:
-            if str(item.rdtype).upper() != rdtype:
-                continue
-            try:
-                rdata = item.to_rdata()
-            except Exception:
-                continue
-            ip = _ip_text(getattr(rdata, "address", None))
-            if ip and ip not in found:
-                found.append(ip)
-    return found
-
-
-def _ns_rrset(message, qname):
-    owner = qname.canonicalize()
-    for section in (message.answer, message.authority):
-        for rrset in section:
-            if rrset.rdtype != dns.rdatatype.NS:
-                continue
-            if rrset.name.canonicalize() != owner:
-                continue
-            if len(rrset) == 0:
-                continue
-            return rrset
-    return None
-
-
-def _section(rrsets) -> list:
-    items = []
-    for rrset in rrsets:
-        rdtype = dns.rdatatype.to_text(rrset.rdtype)
-        for rdata in rrset:
-            items.append(
-                LookupRR(
-                    name=rrset.name.to_text(),
-                    rdtype=rdtype,
-                    ttl=int(rrset.ttl),
-                    data=rdata.to_text(),
-                    wire=rdata.to_wire(),
-                ))
-    return items
-
-
-def _harvest_message(message, glue: dict) -> None:
-    for section in (message.additional, message.answer):
-        for rrset in section:
-            if rrset.rdtype not in (dns.rdatatype.A, dns.rdatatype.AAAA):
-                continue
-            for rdata in rrset:
-                _remember(glue, rrset.name, getattr(rdata, "address", None))
-
-
-def _remember(glue: dict, owner, address) -> None:
-    ip = _ip_text(address)
-    if ip is None:
-        return
-    if not isinstance(owner, dns.name.Name):
-        try:
-            owner = _as_name(owner)
-        except Exception:
-            return
-    bucket = glue.setdefault(owner.canonicalize(), [])
-    if ip not in bucket:
-        bucket.append(ip)
-
-
 def _as_name(value) -> dns.name.Name:
     if isinstance(value, dns.name.Name):
         return value
@@ -319,30 +227,3 @@ def _name_text(value) -> str:
     if text and not text.endswith("."):
         text += "."
     return text
-
-
-def _ip_text(value):
-    if value is None:
-        return None
-    try:
-        return str(ipaddress.ip_address(str(value).strip()))
-    except ValueError:
-        return None
-
-
-def _timeout(settings) -> float:
-    raw = getattr(settings, "doh_timeout_seconds", 5.0)
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return 5.0
-    if value <= 0:
-        return 5.0
-    return value
-
-
-def _failure_text(exc: BaseException) -> str:
-    text = str(exc).strip()
-    if text:
-        return f"{exc.__class__.__name__}: {text}"
-    return exc.__class__.__name__

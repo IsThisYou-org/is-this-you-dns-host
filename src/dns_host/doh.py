@@ -1,14 +1,19 @@
 """DNS lookup interface and the Web3DNS-compatible DoH JSON client.
 
 Only the parameters documented for https://api.isthisyou.org/ are sent:
-``name``, ``type``, ``do``, ``rd``, ``server``, ``cd``. No other paths or
-query parameters are invented. ``do=1`` responses may carry base64 ``rdata``;
-that wire form is preferred over presentation text.
+``name``, ``type``, ``do``, ``rd``, ``server``, ``servers``, ``cd``. No other
+paths or query parameters are invented. ``server`` is one nameserver, used
+for root-zone data. ``servers`` is a comma-separated pair (or a final single
+name) of FQDNs or addresses; the API asks that pair and returns the fastest
+answer. ``do=1`` responses may carry base64 ``rdata``; that wire form is
+preferred over presentation text. A top-level ``Responder`` is kept when
+the API sends one.
 """
 
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import urllib.error
 import urllib.parse
@@ -42,14 +47,14 @@ class LookupRR:
             rdtype = dns.rdatatype.from_text(self.rdtype)
         if self.wire is not None:
             try:
-                return dns.rdata.from_wire(
-                    dns.rdataclass.IN, rdtype, self.wire, 0, len(self.wire)
-                )
+                return dns.rdata.from_wire(dns.rdataclass.IN, rdtype,
+                                           self.wire, 0, len(self.wire))
             except Exception:
                 if not self.data:
                     raise
         if not self.data:
-            raise LookupError(f"RR {self.name}/{self.rdtype} has neither rdata nor data")
+            raise LookupError(
+                f"RR {self.name}/{self.rdtype} has neither rdata nor data")
         return rdata_from_text(rdtype, self.data)
 
 
@@ -60,6 +65,7 @@ class LookupResponse:
     authority: list[LookupRR] = field(default_factory=list)
     additional: list[LookupRR] = field(default_factory=list)
     aa: bool = False
+    responder: str | None = None
 
 
 class Lookup:
@@ -71,11 +77,35 @@ class Lookup:
         rdtype: str,
         *,
         server: str | None = None,
+        servers: list[str] | None = None,
         rd: int = 0,
         do: int = 1,
         cd: int | None = None,
     ) -> LookupResponse:
         raise NotImplementedError
+
+
+def _responder(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _servers_param(servers) -> str:
+    """Comma-separated ``servers=`` value. Hostnames go through ``_fqdn``."""
+
+    tokens = []
+    for item in servers:
+        text = str(item).strip()
+        if not text:
+            continue
+        try:
+            ipaddress.ip_address(text)
+        except ValueError:
+            text = _fqdn(text)
+        tokens.append(text)
+    return ",".join(tokens)
 
 
 def _fqdn(text: str) -> str:
@@ -110,8 +140,7 @@ def _section(items) -> list[LookupRR]:
                 ttl=int(ttl or 0),
                 data=str(item.get("data") or ""),
                 wire=wire,
-            )
-        )
+            ))
     return out
 
 
@@ -124,10 +153,12 @@ def parse_doh_json(body: dict) -> LookupResponse:
         authority=_section(body.get("Authority")),
         additional=_section(body.get("Additional")),
         aa=bool(body.get("AA", False)),
+        responder=_responder(body.get("Responder")),
     )
 
 
 class DohClient(Lookup):
+
     def __init__(self, base_url: str, timeout: float = 5.0):
         self.base_url = base_url
         self.timeout = timeout
@@ -138,6 +169,7 @@ class DohClient(Lookup):
         rdtype: str,
         *,
         server: str | None = None,
+        servers: list[str] | None = None,
         rd: int = 0,
         do: int = 1,
         cd: int | None = None,
@@ -149,17 +181,22 @@ class DohClient(Lookup):
             "do": str(int(do)),
             "rd": str(int(rd)),
         }
-        if server:
+        if servers:
+            params["servers"] = _servers_param(servers)
+        elif server:
             params["server"] = _fqdn(server)
         if cd is not None:
             params["cd"] = str(int(cd))
         parts = urllib.parse.urlsplit(self.base_url)
         path = parts.path or "/"
         query = urllib.parse.urlencode(params)
-        url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, ""))
-        request = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
+        url = urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, path, query, ""))
+        request = urllib.request.Request(
+            url, headers={"Accept": "application/dns-json"})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request,
+                                        timeout=self.timeout) as response:
                 payload = response.read()
         except urllib.error.URLError as exc:
             raise LookupError(f"resolver request failed: {exc}") from exc
