@@ -60,16 +60,19 @@ class Api:
         key = (name, rdtype, server, tuple(servers or ()))
         if key not in self.table:
             return LookupResponse(status=2)
-        return self.table[key]
+        got = self.table[key]
+        if isinstance(got, list):
+            return got.pop(0)
+        return got
 
 
 def test_tld_apex_with_in_bailiwick_ns_uses_servers_and_skips_glue(
         env, syslog_lines):
     """example. with NS ns1.example. and no address records in the zone.
 
-    The parent is the root. The fake API is the Handshake root path
-    (``server=`` for root-zone data, ``servers=`` for the re-check). No
-    address query is made for the in-bailiwick nameserver.
+    The parent is the root. Root-zone DS and the delegation NS both use
+    ``servers=`` set to the walk's root server, including the DS re-check.
+    No address query is made for the in-bailiwick nameserver.
     """
 
     set_log_level("info")
@@ -100,22 +103,23 @@ def test_tld_apex_with_in_bailiwick_ns_uses_servers_and_skips_glue(
         return _signed(rrset, private, dnskey, signer, inception, expiration)
 
     table = {
-        (".", "DNSKEY", root_server, ()):
+        (".", "DNSKEY", None, (root_server, )):
         LookupResponse(status=0,
                        answer=signed(root_dnskey, root_ksk_priv, root_ksk,
                                      root)),
-        (".", "NS", root_server, ()):
+        (".", "NS", None, (root_server, )):
         LookupResponse(status=0,
                        answer=signed(root_ns, root_zsk_priv, root_zsk, root)),
-        ("example.", "DS", root_server, ()):
-        LookupResponse(status=0,
-                       answer=signed(stale, root_zsk_priv, root_zsk, root)),
-        ("example.", "NS", None, (ns.to_text(), )):
+        ("example.", "NS", None, (root_server, )):
         LookupResponse(status=0, authority=_items(child_ns)),
-        ("example.", "DS", None, (ns.to_text(), )):
-        LookupResponse(status=0,
-                       answer=signed(fresh, root_zsk_priv, root_zsk, root),
-                       responder="192.0.2.8"),
+        ("example.", "DS", None, (root_server, )): [
+            LookupResponse(status=0,
+                           answer=signed(stale, root_zsk_priv, root_zsk,
+                                         root)),
+            LookupResponse(status=0,
+                           answer=signed(fresh, root_zsk_priv, root_zsk, root),
+                           responder="192.0.2.8"),
+        ],
     }
     api = Api(table)
     env.settings.service_ns = [ns]
@@ -142,7 +146,7 @@ def test_tld_apex_with_in_bailiwick_ns_uses_servers_and_skips_glue(
         apex,
         now,
         anchors=[dns.dnssec.make_ds(root, root_ksk, "SHA256")],
-        root_server=root_server,
+        root_servers=[root_server],
         cache=None,
         root_id="handshake",
     )
@@ -155,19 +159,15 @@ def test_tld_apex_with_in_bailiwick_ns_uses_servers_and_skips_glue(
         call for call in api.calls if call["type"] in {"A", "AAAA"}
     ]
     assert address_lookups == []
-    root_ds = [
-        call for call in api.calls if call["name"] == "example."
-        and call["type"] == "DS" and call["server"]
+    ds_calls = [
+        call for call in api.calls
+        if call["name"] == "example." and call["type"] == "DS"
     ]
-    assert root_ds
-    assert all(call["server"] == root_server and call["rd"] == 0
-               and call["servers"] is None for call in root_ds)
-    recheck = [
-        call for call in api.calls if call["name"] == "example."
-        and call["type"] == "DS" and call["servers"]
-    ]
-    assert [call["servers"] for call in recheck] == [[ns.to_text()]]
-    assert all(call["rd"] == 0 and call["do"] == 1 for call in recheck)
+    assert [call["servers"] for call in ds_calls] == [[root_server],
+                                                      [root_server]]
+    assert all(
+        call.get("server") is None and call["rd"] == 0 and call["do"] == 1
+        for call in ds_calls)
     logged = [
         json.loads(line) for line in syslog_lines if "parent DS taken" in line
     ]

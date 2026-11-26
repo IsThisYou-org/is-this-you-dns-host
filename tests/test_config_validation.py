@@ -175,6 +175,15 @@ def test_doh_timeout_must_be_a_positive_number():
     }).doh_timeout_seconds == 1.5
 
 
+def test_removed_handshake_settings_are_unknown_keys():
+    with pytest.raises(SystemExit,
+                       match="unknown key 'handshake_root_servers'"):
+        Settings.from_mapping({"handshake_root_servers": ["hs.example."]})
+    with pytest.raises(SystemExit,
+                       match="unknown key 'handshake_trust_anchor_file'"):
+        Settings.from_mapping({"handshake_trust_anchor_file": "/no/such"})
+
+
 def test_ds_digest_types_is_rejected_as_an_unknown_key():
     with pytest.raises(SystemExit,
                        match="unknown key 'ds_digest_types'") as raised:

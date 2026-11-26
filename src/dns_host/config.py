@@ -100,8 +100,6 @@ _KNOWN_KEYS = frozenset(_INT_FIELDS) | {
     "catalog_zone",
     "catalog_rname",
     "doh_timeout_seconds",
-    "handshake_root_servers",
-    "handshake_trust_anchor_file",
     "type_allowlist",
     "trusted_proxies",
     "health_check_dns",
@@ -340,8 +338,6 @@ class Settings:
     doh_timeout_seconds: float = 5.0
     doh_cd: int = 1
     trust_anchors: list = field(default_factory=list)
-    handshake_root_servers: list = field(default_factory=list)
-    handshake_trust_anchors: list = field(default_factory=list)
     maintenance_interval_seconds: int = 300
     soa_refresh: int = 60
     soa_retry: int = 60
@@ -453,11 +449,6 @@ class Settings:
         for key, (default, low, high) in _INT_FIELDS.items():
             ints[key] = _map_int(raw, key, default, low, high, errors, failed)
         timeout = _map_timeout(raw, errors)
-        anchors = _handshake_anchors(raw, errors)
-        roots = _guard(
-            errors, "handshake_root_servers",
-            lambda: _names_value(raw.get("handshake_root_servers", []),
-                                 "handshake_root_servers"), [])
         proxies = _trusted_proxies(raw, errors)
         health = _map_bool(raw, "health_check_dns", True, errors)
         _cross_checks(ints, failed, errors)
@@ -496,8 +487,6 @@ class Settings:
             doh_timeout_seconds=timeout,
             doh_cd=ints["doh_cd"],
             trust_anchors=load_ds_anchors(TRUST_ANCHOR_FILE),
-            handshake_root_servers=roots,
-            handshake_trust_anchors=anchors,
             maintenance_interval_seconds=ints["maintenance_interval_seconds"],
             soa_refresh=ints["soa_refresh"],
             soa_retry=ints["soa_retry"],
@@ -792,25 +781,6 @@ def _resolver_base_url(raw: dict, errors: list[str]) -> str:
         errors.append(f"invalid {key} {value!r}: expected a string")
         return default
     return value
-
-
-def _handshake_anchors(raw: dict, errors: list[str]) -> list:
-    key = "handshake_trust_anchor_file"
-    if key not in raw or raw.get(key) in (None, ""):
-        return []
-    value = raw.get(key)
-    if not isinstance(value, str):
-        errors.append(f"invalid {key} {value!r}: expected a path")
-        return []
-    path = Path(value)
-    if not path.is_file():
-        errors.append(f"invalid {key}: {path} is not a file")
-        return []
-    try:
-        return load_ds_anchors(path)
-    except (OSError, ValueError) as exc:
-        errors.append(f"invalid {key}: {exc}")
-        return []
 
 
 def _trusted_proxies(raw: dict, errors: list[str]) -> list:

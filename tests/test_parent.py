@@ -128,8 +128,9 @@ def test_bad_signature_runs_after_parent_and_ds(env):
         env.lab.zone(tamper=f"_auth.7e9a2f4c8b1d.{env.lab.apex.to_text()}"))
     assert response.status_code == 422, response.get_json()
     assert response.get_json()["error"] == "zone_validation_failed"
-    assert any(call["type"] == "DS" and call["server"]
-               for call in env.lab.calls)
+    assert any(
+        call["type"] == "DS" and (call.get("server") or call.get("servers"))
+        for call in env.lab.calls)
 
 
 class _RecordingLookup:
@@ -138,11 +139,20 @@ class _RecordingLookup:
         self.calls = []
         self.status = status
 
-    def query(self, name, rdtype, *, server=None, rd=0, do=1, cd=None):
+    def query(self,
+              name,
+              rdtype,
+              *,
+              server=None,
+              servers=None,
+              rd=0,
+              do=1,
+              cd=None):
         self.calls.append({
             "name": name,
             "type": rdtype,
             "server": server,
+            "servers": list(servers) if servers else None,
             "rd": rd,
             "do": do,
             "cd": cd,
@@ -151,13 +161,14 @@ class _RecordingLookup:
 
 
 @pytest.mark.parametrize(
-    ("name", "rdtype", "servers", "rd", "server"),
+    ("name", "rdtype", "servers", "rd", "sent_servers"),
     [
         (".", "DNSKEY", [None], 0, None),
         (".", "NS", [None], 0, None),
-        ("example.", "DS", ["a.root-servers.net."], 0, "a.root-servers.net."),
+        ("example.", "DS", ["a.root-servers.net."], 0, ["a.root-servers.net."
+                                                        ]),
         ("me.", "DS", ["a.root-servers.net.", "b.root-servers.net."
-                       ], 0, "a.root-servers.net."),
+                       ], 0, ["a.root-servers.net.", "b.root-servers.net."]),
         ("example.", "DNSKEY", ["ns1.example.", "ns2.example."], 1, None),
         ("example.", "NS", ["a.root-servers.net."], 1, None),
         ("me.", "DNSKEY", ["ns1.me."], 1, None),
@@ -169,7 +180,7 @@ class _RecordingLookup:
     ],
 )
 def test_rd_is_zero_only_for_root_zone_data(env, name, rdtype, servers, rd,
-                                            server):
+                                            sent_servers):
     env.settings.doh_cd = 0
     lookup = _RecordingLookup()
     _query_type(lookup, env.settings, dns.name.from_text(name), rdtype,
@@ -181,7 +192,8 @@ def test_rd_is_zero_only_for_root_zone_data(env, name, rdtype, servers, rd,
     assert call["rd"] == rd
     assert call["do"] == 1
     assert call["cd"] == 0
-    assert call["server"] == server
+    assert call["server"] is None
+    assert call["servers"] == sent_servers
 
 
 def test_tld_dnskey_query_uses_rd1_without_server(env):
@@ -197,14 +209,18 @@ def test_tld_dnskey_query_uses_rd1_without_server(env):
                for call in dnskeys)
     root = [call for call in env.lab.calls if call["name"] == "."]
     assert root
-    assert all(call["rd"] == 0 and call["server"] is None
+    assert all(call["rd"] == 0 and call.get("server") is None
                and call["type"] in {"DNSKEY", "NS"} for call in root)
+    assert any(call["type"] == "NS" and call.get("servers") is None
+               for call in root)
+    assert any(call["servers"] == ["a.root-servers.net."] for call in root)
     tld_ds = [
         call for call in env.lab.calls
         if call["type"] == "DS" and call["name"] == "example."
     ]
     assert tld_ds
-    assert all(call["rd"] == 0 and call["server"] == "a.root-servers.net."
+    assert all(call["rd"] == 0 and call.get("server") is None
+               and call.get("servers") == ["a.root-servers.net."]
                for call in tld_ds)
     below = [
         call for call in env.lab.calls if not call.get("direct") and (
@@ -222,7 +238,7 @@ def test_tld_dnskey_query_uses_rd1_without_server(env):
     assert all(call["cd"] == env.settings.doh_cd for call in resolver)
 
 
-def test_handshake_root_data_uses_rd0_at_the_handshake_server(env):
+def test_explicit_root_servers_are_used_for_root_zone_data(env):
     server = "hs-root.example."
     for rdtype in ("DNSKEY", "NS"):
         env.lab.responses[(".", rdtype,
@@ -237,18 +253,21 @@ def test_handshake_root_data_uses_rd0_at_the_handshake_server(env):
         env.lab.apex,
         env.settings.now(),
         anchors=[env.lab.root_ds],
-        root_server=server,
+        root_servers=[server],
         cache=None,
         root_id="handshake",
     )
     assert delegation.parent_zone == env.lab.parent
     root_zone = [
-        call for call in env.lab.calls if call["name"] == "." or (
-            call["name"] == "example." and call["type"] == "DS")
+        call for call in env.lab.calls
+        if not call.get("direct") and (call["name"] == "." or (
+            call["name"] == "example." and call["type"] == "DS"))
     ]
     assert root_zone
-    assert all(call["rd"] == 0 and call["do"] == 1 and call["server"] == server
-               for call in root_zone)
+    assert all(
+        call["rd"] == 0 and call["do"] == 1
+        and call.get("servers") == [server] and call.get("server") is None
+        for call in root_zone)
     other = [
         call for call in env.lab.calls
         if call not in root_zone and not call.get("direct")
@@ -270,7 +289,15 @@ def test_lookup_error_text_is_logged_and_returned(env, syslog_lines):
         def __init__(self):
             self.n = 0
 
-        def query(self, name, rdtype, *, server=None, rd=0, do=1, cd=None):
+        def query(self,
+                  name,
+                  rdtype,
+                  *,
+                  server=None,
+                  servers=None,
+                  rd=0,
+                  do=1,
+                  cd=None):
             self.n += 1
             raise LookupError(f"resolver request failed: attempt {self.n}")
 
@@ -285,13 +312,12 @@ def test_lookup_error_text_is_logged_and_returned(env, syslog_lines):
     err = raised.value
     assert err.status == 503
     assert err.error == "parent_lookup_unavailable"
-    assert err.message == "DNSKEY lookup for . failed: resolver request failed: attempt 2"
+    assert err.message == "DNSKEY lookup for . failed: resolver request failed: attempt 1"
     logged = [json.loads(line) for line in syslog_lines]
     warnings = [
         item for item in logged if item.get("msg") == "parent lookup failed"
     ]
     assert [item["error"] for item in warnings] == [
         "resolver request failed: attempt 1",
-        "resolver request failed: attempt 2",
     ]
     assert all(item["level"] == "warning" for item in warnings)
