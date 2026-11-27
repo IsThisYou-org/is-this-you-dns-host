@@ -2,6 +2,8 @@
 
 import json
 import threading
+
+import dns.name
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from urllib.parse import parse_qs, urlsplit
@@ -53,7 +55,48 @@ def test_client_sends_only_documented_parameters(lab):
     assert "server=ns1.parent.example." in path
     keys = set(
         part.split("=", 1)[0] for part in path.split("?", 1)[1].split("&"))
-    assert keys <= {"name", "type", "do", "rd", "cd", "server", "servers"}
+    assert keys <= {
+        "name", "type", "do", "rd", "cd", "server", "servers", "ct"
+    }
+
+
+def test_truncated_answer_is_retried_with_ct():
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+
+        def do_GET(self):
+            seen.append(self.path)
+            if "ct=1" in self.path:
+                body = json.dumps({"Status": 0, "TC": False}).encode()
+            else:
+                body = json.dumps({"Status": 0, "TC": True}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/dns-json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _fmt, *_args):
+            return
+
+    from dns_host.chain import _query_once
+    from dns_host.config import Settings
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        client = DohClient(f"http://127.0.0.1:{port}/", timeout=2)
+        response = _query_once(client, Settings(), dns.name.root, "DNSKEY",
+                               None)
+    finally:
+        server.shutdown()
+    assert response.tc is False
+    assert len(seen) == 2
+    assert "ct=1" not in seen[0]
+    assert "ct=1" in seen[1]
 
 
 def test_servers_is_a_comma_separated_pair_and_responder_is_optional():
@@ -155,4 +198,6 @@ def test_resolver_base_url_override_is_used(env, tmp_path):
     for path in seen:
         keys = set(
             part.split("=", 1)[0] for part in path.split("?", 1)[1].split("&"))
-        assert keys <= {"name", "type", "do", "rd", "cd", "server", "servers"}
+        assert keys <= {
+            "name", "type", "do", "rd", "cd", "server", "servers", "ct"
+        }

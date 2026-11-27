@@ -103,9 +103,18 @@ class Lab:
             dns.dnssec.make_ds(self.parent, self.parent_ksk, "SHA256"))
         parent_ds_sig = self._sig(parent_ds, self.root_zsk_priv, self.root_zsk,
                                   self.root)
-        # TLD DS lives in the root zone and is read at the root nameservers.
+        # TLD DS and the delegation NS are both read at the root nameservers.
+        delegation_ns = dns.rrset.from_text(
+            self.parent, ttl, "IN", "NS",
+            *[name.to_text() for name in self.parent_ns])
         for server in self.root_ns:
             self._put(self.parent, "DS", server, parent_ds, parent_ds_sig)
+            self._put(self.parent,
+                      "NS",
+                      server,
+                      delegation_ns,
+                      None,
+                      section="authority")
 
         parent_dnskey = dns.rrset.from_rdata(self.parent, ttl, self.parent_ksk,
                                              self.parent_zsk)
@@ -116,10 +125,15 @@ class Lab:
             *[name.to_text() for name in self.parent_ns])
         parent_auth_sig = self._sig(parent_auth_ns, self.parent_zsk_priv,
                                     self.parent_zsk, self.parent)
-        # Below the root the walk recurses (rd=1) and does not pass server=.
+        # Below the root the walk asks the zone's own nameservers, rd=0.
         self._put(self.parent, "DNSKEY", None, parent_dnskey,
                   parent_dnskey_sig)
         self._put(self.parent, "NS", None, parent_auth_ns, parent_auth_sig)
+        for server in self.parent_ns:
+            self._put(self.parent, "DNSKEY", server, parent_dnskey,
+                      parent_dnskey_sig)
+            self._put(self.parent, "NS", server, parent_auth_ns,
+                      parent_auth_sig)
 
         if ds == "missing":
             self._put_missing_ds()
@@ -130,6 +144,8 @@ class Lab:
             wrong_sig = self._sig(wrong, self.parent_zsk_priv, self.parent_zsk,
                                   self.parent)
             self._put(self.apex, "DS", None, wrong, wrong_sig)
+            for server in self.parent_ns:
+                self._put(self.apex, "DS", server, wrong, wrong_sig)
         else:
             child_ds = dns.rrset.from_rdata(
                 self.apex, ttl,
@@ -137,6 +153,8 @@ class Lab:
             child_ds_sig = self._sig(child_ds, self.parent_zsk_priv,
                                      self.parent_zsk, self.parent)
             self._put(self.apex, "DS", None, child_ds, child_ds_sig)
+            for server in self.parent_ns:
+                self._put(self.apex, "DS", server, child_ds, child_ds_sig)
 
         if ns == "incomplete":
             targets = [self.service_ns[0]]
@@ -147,6 +165,13 @@ class Lab:
         referral = dns.rrset.from_text(self.apex, ttl, "IN", "NS",
                                        *[name.to_text() for name in targets])
         self._put(self.apex, "NS", None, referral, None, section="authority")
+        for server in self.parent_ns:
+            self._put(self.apex,
+                      "NS",
+                      server,
+                      referral,
+                      None,
+                      section="authority")
 
     def _put_missing_ds(self) -> None:
         ttl = 300
@@ -158,10 +183,10 @@ class Lab:
             self.apex, ttl, "IN", "NS",
             *[name.to_text() for name in self.service_ns])
         items = _pack(nsec, nsec_sig) + _pack(referral)
-        self.responses[_key(self.apex, "DS",
-                            None)] = LookupResponse(status=0,
-                                                    authority=items,
-                                                    aa=False)
+        response = LookupResponse(status=0, authority=items, aa=False)
+        self.responses[_key(self.apex, "DS", None)] = response
+        for server in self.parent_ns:
+            self.responses[_key(self.apex, "DS", server)] = response
 
     def _sig(self, rrset, private, dnskey, signer):
         signature = sign_rrset(rrset, private, dnskey, signer, self.inception,
@@ -187,7 +212,7 @@ class Lab:
         """Canned parent NS answers for the direct delegation query.
 
         A per-server answer wins. Otherwise the server-less fixture (the
-        referral the resolver would have returned with ``rd=1``) is used.
+        referral stored with no server) is used.
         Status other than NOERROR or NXDOMAIN is not a delegation. No canned
         response means that parent nameserver was not reached.
         """

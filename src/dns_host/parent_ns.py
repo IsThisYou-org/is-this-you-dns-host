@@ -7,8 +7,10 @@ The SERVFAIL is not a parent answer. Ask the resolver API instead, with
 API asks that pair and returns the fastest answer. A failed pair is
 followed by the next pair.
 
-Delegation NS records are unsigned. The DS, fetched through the resolver
-and checked against the parent DNSKEY, is what proves the chain.
+The validation walk asks for NS itself, with ``do=1``, through the same
+query it uses for every other hop. This helper remains for a caller that
+wants the NS RRset alone. Delegation NS records are unsigned. The DS,
+checked against the parent DNSKEY, is what proves the chain.
 """
 
 from __future__ import annotations

@@ -126,15 +126,15 @@ def test_icann_nxdomain_starts_the_handshake_walk_for_an_sld(
         if (servers is None and call["rd"] == 0 and name == "hnstld."
                 and rdtype == "NS"):
             return LookupResponse(status=0, answer=_items(tld_ns))
-        if name == "hnstld." and rdtype == "DNSKEY" and call["rd"] == 1:
+        if name == "hnstld." and rdtype == "DNSKEY" and call["rd"] == 0:
             return LookupResponse(status=0,
                                   answer=signed(tld_dnskey, tld_ksk_priv,
                                                 tld_ksk, tld))
-        if name == "hnstld." and rdtype == "NS" and call["rd"] == 1:
+        if name == "hnstld." and rdtype == "NS" and call["rd"] == 0:
             return LookupResponse(status=0,
                                   answer=signed(tld_ns, tld_zsk_priv, tld_zsk,
                                                 tld))
-        if name == "example.hnstld." and rdtype == "DS" and call["rd"] == 1:
+        if name == "example.hnstld." and rdtype == "DS" and call["rd"] == 0:
             return LookupResponse(status=0,
                                   answer=signed(child_ds, tld_zsk_priv,
                                                 tld_zsk, tld))
@@ -317,15 +317,15 @@ def test_icann_ds_nxdomain_starts_the_handshake_walk(env, syslog_lines):
         if (servers is None and call["rd"] == 0 and name == "hnstld."
                 and rdtype == "NS"):
             return LookupResponse(status=0, authority=_items(tld_ns))
-        if name == "hnstld." and rdtype == "DNSKEY" and call["rd"] == 1:
+        if name == "hnstld." and rdtype == "DNSKEY" and call["rd"] == 0:
             return LookupResponse(status=0,
                                   answer=signed(tld_dnskey, tld_ksk_priv,
                                                 tld_ksk, tld))
-        if name == "hnstld." and rdtype == "NS" and call["rd"] == 1:
+        if name == "hnstld." and rdtype == "NS" and call["rd"] == 0:
             return LookupResponse(status=0,
                                   answer=signed(tld_ns, tld_zsk_priv, tld_zsk,
                                                 tld))
-        if name == "example.hnstld." and rdtype == "DS" and call["rd"] == 1:
+        if name == "example.hnstld." and rdtype == "DS" and call["rd"] == 0:
             return LookupResponse(status=0,
                                   answer=signed(child_ds, tld_zsk_priv,
                                                 tld_zsk, tld))

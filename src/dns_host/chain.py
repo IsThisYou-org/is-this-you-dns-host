@@ -9,8 +9,9 @@ root DNSKEY, the root NS, the TLD DS, and the TLD delegation NS.
 local root. When the ICANN root returns NXDOMAIN for the TLD, the TLD DS
 and NS are read again with ``rd=0`` and no server. Those two RRsets are
 the Handshake anchor and are not checked against a root DNSKEY. Below
-that TLD, and below the ICANN root, DNSKEY and DS use ``rd=1`` and do not
-pass a server. ``cd`` follows ``settings.doh_cd``.
+that TLD. From the first validated DNSKEY downward every query is
+``rd=0`` and ``do=1``, sent to that zone's nameservers. A truncated
+answer is retried once with ``ct=1``. ``cd`` follows ``settings.doh_cd``.
 
 Delegation NS are not taken from a recursive lookup. Each zone cut is
 asked through the resolver API with ``rd=0`` and ``servers=`` set to a
@@ -33,7 +34,7 @@ from dns_host.doh import Lookup, LookupError, LookupResponse
 from dns_host.errors import ApiError
 from dns_host.logutil import log
 from dns_host.names import normalise_name
-from dns_host.parent_ns import fetch_delegation_ns, query_parent_servers
+from dns_host.parent_ns import query_parent_servers
 
 DS = dns.rdatatype.DS
 NS = dns.rdatatype.NS
@@ -140,6 +141,46 @@ class TldMissingAtRoot(ApiError):
         self.name = name
 
 
+class NoDelegation(ApiError):
+    """The parent answered and had no NS for this name."""
+
+
+class DsNotAuthenticated(ApiError):
+    """No DS, and the absence was not proved."""
+
+
+class DsUnsigned(ApiError):
+    """A DS that must be signed arrived without an RRSIG."""
+
+
+class SignatureMissing(ApiError):
+    """An RRset the walk must authenticate arrived without an RRSIG."""
+
+
+class InsecureDelegation(ApiError):
+    """A proved-empty DS on a zone the walk still has to descend through."""
+
+
+class NameDoesNotExist(ApiError):
+    """Proved or unauthenticated NXDOMAIN below the root."""
+
+
+class DsMismatch(ApiError):
+    """The DNSKEY RRset does not match the DS or trust anchor."""
+
+
+class BadSignature(ApiError):
+    """An RRSIG is present and is not valid for the RRset."""
+
+
+class ExpiredSignature(ApiError):
+    """Every RRSIG on the RRset is outside its validity window."""
+
+
+class TruncatedAnswer(ApiError):
+    """The answer stayed truncated after the TCP retry."""
+
+
 def _tld_missing(error: ApiError) -> bool:
     # Set only when the DS answer or the NS answer for a name under the
     # root is NXDOMAIN. A missing DS at a name that exists stays a plain
@@ -153,6 +194,7 @@ def _cut_error(parent_zone,
                error: str,
                message: str,
                name: dns.name.Name,
+               kind: type[ApiError],
                *,
                proved: bool = False) -> ApiError:
     """The zone-cut failure. Root NXDOMAIN is ``TldMissingAtRoot``."""
@@ -161,7 +203,7 @@ def _cut_error(parent_zone,
         _is_nxdomain(response) for response in responses))
     if missing:
         return TldMissingAtRoot(status, error, message, name)
-    return ApiError(status, error, message)
+    return kind(status, error, message)
 
 
 def _walk_from_root(lookup,
@@ -307,30 +349,17 @@ def _responders(*responses) -> str | None:
 def _query_no_server(lookup, settings, name, rdtype: str):
     """One ``rd=0`` query with neither ``server`` nor ``servers``."""
 
-    qname = name if isinstance(name, dns.name.Name) else normalise_name(
-        str(name), allow_root=True)
-    try:
-        response = lookup.query(qname.to_text(),
-                                rdtype,
-                                rd=0,
-                                do=1,
-                                cd=settings.doh_cd)
-    except LookupError as exc:
-        log(
-            "warning",
-            "parent lookup failed",
-            name=qname.to_text(),
-            rdtype=rdtype,
-            error=str(exc),
-        )
-        raise
+    rrset, _sigs, response = _query_type(lookup,
+                                         settings,
+                                         name,
+                                         rdtype, [None],
+                                         with_response=True)
     if int(response.status) not in (0, 3):
         raise ApiError(
             503,
             "parent_lookup_unavailable",
-            f"{rdtype} lookup for {qname.to_text()} failed: status {response.status}",
+            f"{rdtype} lookup for {name if isinstance(name, str) else name.to_text()} failed: status {response.status}",
         )
-    rrset, _sigs = _extract(response, qname, rdtype)
     return rrset, response
 
 
@@ -374,8 +403,19 @@ def _descend(
         # follows the referral into the child, which is not served until
         # admission, and that SERVFAIL must not be reported as the answer.
         # An NXDOMAIN here is the response, not an error from parent_ns.
-        ns_rrset, ns_response = fetch_delegation_ns(lookup, settings, child,
-                                                    ns_servers, budget)
+        _ns_rrset, _ns_sigs, ns_response = _query_type(lookup,
+                                                       settings,
+                                                       child,
+                                                       "NS",
+                                                       ns_servers,
+                                                       with_response=True)
+        if ns_response is None or int(ns_response.status) not in (0, 3):
+            status = getattr(ns_response, "status", None)
+            reached = status is not None
+            detail = f"status {status}" if reached else "no response"
+            from dns_host.parent_ns import delegation_lookup_error
+            raise delegation_lookup_error(child, reached, [detail])
+        ns_rrset = _ns_rrset
         denial = (ns_response, ds_response)
         proved_missing = _proved_nxdomain(
             child, ns_response,
@@ -389,11 +429,13 @@ def _descend(
                 "parent_ds_missing",
                 f"{child} does not exist under {parent_zone}",
                 child,
+                NameDoesNotExist,
                 proved=True,
             )
         if _is_nxdomain(ds_response) and _is_nxdomain(ns_response):
             raise _cut_error(parent_zone, denial, 403, "parent_chain_invalid",
-                             f"unauthenticated NXDOMAIN for {child}", child)
+                             f"unauthenticated NXDOMAIN for {child}", child,
+                             NameDoesNotExist)
         if ns_rrset is None:
             if not is_target and (_proved_nodata(
                     child, NS, ns_response, parent_zone, parent_keys,
@@ -401,7 +443,8 @@ def _descend(
                                            parent_keys, now)):
                 continue
             raise _cut_error(parent_zone, denial, 403, "parent_chain_invalid",
-                             f"parent served no delegation for {child}", child)
+                             f"parent served no delegation for {child}", child,
+                             NoDelegation)
         proved_absent = False
         if ds_rrset is None:
             proved_absent = _proved_nodata(child, DS, ds_response, parent_zone,
@@ -414,12 +457,14 @@ def _descend(
                     "parent_chain_invalid",
                     f"DS for {child} was not returned and its absence was not authenticated",
                     child,
+                    DsNotAuthenticated,
                 )
         else:
             if ds_sigs is None:
                 raise _cut_error(parent_zone, denial, 403,
                                  "parent_chain_invalid",
-                                 f"DS for {child} has no RRSIG", child)
+                                 f"DS for {child} has no RRSIG", child,
+                                 DsUnsigned)
             _verify(ds_rrset, ds_sigs, parent_zone, parent_keys, now,
                     f"DS {child}")
         if is_target:
@@ -437,7 +482,7 @@ def _descend(
                 parent_servers=recheck_servers,
             )
         if proved_absent:
-            raise ApiError(
+            raise InsecureDelegation(
                 403,
                 "parent_chain_invalid",
                 f"insecure delegation at {child}; cannot continue the chain",
@@ -533,8 +578,9 @@ def _cached_dnskey(lookup, settings, name, servers, ds_records, now, what,
                        f"{what} was not returned")
     matched = _keys_matching_ds(name, dnskey, ds_records)
     if not matched:
-        raise ApiError(403, "parent_chain_invalid",
-                       f"{what} does not match the trust anchor or parent DS")
+        raise DsMismatch(
+            403, "parent_chain_invalid",
+            f"{what} does not match the trust anchor or parent DS")
     _verify(dnskey, signatures, name, _rrset_of(name, dnskey.ttl, matched),
             now, what)
     if cache is not None:
@@ -546,41 +592,26 @@ def _cached_dnskey(lookup, settings, name, servers, ds_records, now, what,
     return dnskey, signatures
 
 
-def _root_zone_query(name, rdtype: str) -> bool:
-    """True when ``rdtype`` at ``name`` is served from the root zone.
+def _query_type(lookup, settings, name, rdtype, servers, with_response=False):
+    """One authoritative query: ``rd=0``, ``do=1``, TCP retry when ``TC`` is set.
 
-    The ICANN walk reads those with ``rd=0`` and ``servers=``. Anything
-    else is a referral when ``rd=0``.
+    A server list is sent as ``servers=`` pairs. An empty list is one query
+    with no server, which is how the ICANN root names are learned and how
+    the Handshake TLD is read.
     """
 
     qname = name if isinstance(name, dns.name.Name) else normalise_name(
         str(name), allow_root=True)
-    if qname == dns.name.root:
-        return rdtype in ("DNSKEY", "NS")
-    return rdtype == "DS" and qname.parent() == dns.name.root
-
-
-def _query_type(lookup, settings, name, rdtype, servers, with_response=False):
-    qname = name if isinstance(name, dns.name.Name) else normalise_name(
-        str(name), allow_root=True)
-    # Root-zone names are read with servers= when this walk has a server
-    # list. Below the root the walk recurses and does not pass a server.
-    root_zone = _root_zone_query(qname, rdtype)
     named = [server for server in (servers or []) if server]
-    if root_zone and named:
-        # servers= pairs. server= is the merged local root, so it must not
-        # be mixed with a servers= query in the same walk.
+    if named:
         batches = [named[index:index + 2] for index in range(0, len(named), 2)]
     else:
         batches = [None]
     last_response = None
     last_error: LookupError | None = None
     for batch in batches:
-        kwargs = {"rd": 0 if root_zone else 1, "do": 1, "cd": settings.doh_cd}
-        if batch:
-            kwargs["servers"] = batch
         try:
-            response = lookup.query(qname.to_text(), rdtype, **kwargs)
+            response = _query_once(lookup, settings, qname, rdtype, batch)
         except LookupError as exc:
             last_error = exc
             log(
@@ -609,6 +640,23 @@ def _query_type(lookup, settings, name, rdtype, servers, with_response=False):
     if with_response:
         return None, None, last_response
     return None, None
+
+
+def _query_once(lookup, settings, qname, rdtype, batch):
+    kwargs = {"rd": 0, "do": 1, "cd": settings.doh_cd}
+    if batch:
+        kwargs["servers"] = batch
+    response = lookup.query(qname.to_text(), rdtype, **kwargs)
+    if not getattr(response, "tc", False):
+        return response
+    response = lookup.query(qname.to_text(), rdtype, tcp=True, **kwargs)
+    if getattr(response, "tc", False):
+        raise TruncatedAnswer(
+            503,
+            "parent_lookup_unavailable",
+            f"{rdtype} lookup for {qname.to_text()} was truncated",
+        )
+    return response
 
 
 def _extract(response: LookupResponse, qname: dns.name.Name, rdtype: str):
@@ -645,13 +693,26 @@ def _extract(response: LookupResponse, qname: dns.name.Name, rdtype: str):
 
 def _verify(rrset, sigs, signer, keys, now, what: str) -> None:
     if rrset is None or sigs is None or len(sigs) == 0:
-        raise ApiError(403, "parent_chain_invalid",
-                       f"{what} is missing a signature")
+        raise SignatureMissing(403, "parent_chain_invalid",
+                               f"{what} is missing a signature")
     try:
         dns.dnssec.validate(rrset, sigs, {signer: keys}, now=float(now))
     except Exception as exc:
-        raise ApiError(403, "parent_chain_invalid",
-                       f"{what} signature did not validate: {exc}") from exc
+        message = f"{what} signature did not validate: {exc}"
+        if _outside_validity(sigs, now):
+            raise ExpiredSignature(403, "parent_chain_invalid",
+                                   message) from exc
+        raise BadSignature(403, "parent_chain_invalid", message) from exc
+
+
+def _outside_validity(sigs, now) -> bool:
+    """True when no signature's inception/expiration window covers ``now``."""
+
+    moment = int(now)
+    for signature in sigs:
+        if int(signature.inception) <= moment <= int(signature.expiration):
+            return False
+    return True
 
 
 def _rrset_of(name, ttl, rdatas):

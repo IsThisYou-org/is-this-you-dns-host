@@ -50,27 +50,18 @@ def test_ns_set_mismatch(env):
     assert response.get_json()["error"] == "ns_set_mismatch"
 
 
-def test_delegation_ns_is_not_taken_from_the_resolver(env):
+def test_delegation_ns_is_asked_at_the_parent(env):
     response = post(env, env.lab.zone())
     assert response.status_code == 201, response.get_json()
     apex = env.lab.apex.to_text()
     parent = env.lab.parent.to_text()
-    direct = [call for call in env.lab.calls if call.get("direct")]
-    resolver_ns = [
+    ns_calls = [
         call for call in env.lab.calls
-        if call["type"] == "NS" and not call.get("direct")
+        if call["type"] == "NS" and call["rd"] == 0 and call.get("servers")
     ]
-    assert any(call["name"] == apex for call in direct)
-    assert any(call["name"] == parent for call in direct)
-    assert all(call["name"] != apex for call in resolver_ns)
-    root_ns = [call for call in resolver_ns if call["name"] == "."]
-    below_ns = [call for call in resolver_ns if call["name"] != "."]
-    assert root_ns
-    assert all(call["rd"] == 0 and call["do"] == 1 and call["server"] is None
-               for call in root_ns)
-    assert below_ns
-    assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
-               for call in below_ns)
+    assert any(call["name"] == apex for call in ns_calls)
+    assert any(call["name"] == parent for call in ns_calls)
+    assert all(call["do"] == 1 and call["server"] is None for call in ns_calls)
 
 
 def test_parent_nodata_says_served_no_delegation(env):
@@ -102,8 +93,8 @@ def test_missing_parent_response_is_unreachable(env):
     assert response.status_code == 503, response.get_json()
     body = response.get_json()
     assert body["error"] == "parent_lookup_unavailable"
-    assert "parent nameservers unreachable for user.example." in body[
-        "message"]
+    assert "did not answer the delegation query" in body["message"]
+    assert "status 2" in body["message"]
     assert "served no delegation" not in body["message"]
     assert "parent returned no delegation" not in body["message"]
 
@@ -169,18 +160,20 @@ class _RecordingLookup:
                                                         ]),
         ("me.", "DS", ["a.root-servers.net.", "b.root-servers.net."
                        ], 0, ["a.root-servers.net.", "b.root-servers.net."]),
-        ("example.", "DNSKEY", ["ns1.example.", "ns2.example."], 1, None),
-        ("example.", "NS", ["a.root-servers.net."], 1, None),
-        ("me.", "DNSKEY", ["ns1.me."], 1, None),
-        ("me.", "NS", ["a.root-servers.net."], 1, None),
-        ("user.example.", "DS", ["ns1.example."], 1, None),
-        ("user.example.", "NS", ["ns1.example."], 1, None),
-        ("isthisyou.me.", "DS", ["ns1.me."], 1, None),
-        ("james.isthisyou.me.", "DNSKEY", ["ns1.isthisyou.me."], 1, None),
+        ("example.", "DNSKEY", ["ns1.example.", "ns2.example."
+                                ], 0, ["ns1.example.", "ns2.example."]),
+        ("example.", "NS", ["a.root-servers.net."], 0, ["a.root-servers.net."
+                                                        ]),
+        ("me.", "DNSKEY", ["ns1.me."], 0, ["ns1.me."]),
+        ("me.", "NS", ["a.root-servers.net."], 0, ["a.root-servers.net."]),
+        ("user.example.", "DS", ["ns1.example."], 0, ["ns1.example."]),
+        ("user.example.", "NS", ["ns1.example."], 0, ["ns1.example."]),
+        ("isthisyou.me.", "DS", ["ns1.me."], 0, ["ns1.me."]),
+        ("james.isthisyou.me.", "DNSKEY", ["ns1.isthisyou.me."
+                                           ], 0, ["ns1.isthisyou.me."]),
     ],
 )
-def test_rd_is_zero_only_for_root_zone_data(env, name, rdtype, servers, rd,
-                                            sent_servers):
+def test_every_walk_query_is_rd0(env, name, rdtype, servers, rd, sent_servers):
     env.settings.doh_cd = 0
     lookup = _RecordingLookup()
     _query_type(lookup, env.settings, dns.name.from_text(name), rdtype,
@@ -196,7 +189,7 @@ def test_rd_is_zero_only_for_root_zone_data(env, name, rdtype, servers, rd,
     assert call["servers"] == sent_servers
 
 
-def test_tld_dnskey_query_uses_rd1_without_server(env):
+def test_tld_dnskey_is_asked_at_the_tld_nameservers(env):
     get_process_cache().clear()
     response = post(env, env.lab.zone())
     assert response.status_code == 201, response.get_json()
@@ -205,8 +198,10 @@ def test_tld_dnskey_query_uses_rd1_without_server(env):
         if call["type"] == "DNSKEY" and call["name"] == "example."
     ]
     assert dnskeys, "the walk must fetch the TLD DNSKEY"
-    assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
-               for call in dnskeys)
+    assert all(
+        call["rd"] == 0 and call["do"] == 1 and call["server"] is None
+        and call["servers"] == [name.to_text() for name in env.lab.parent_ns]
+        for call in dnskeys)
     root = [call for call in env.lab.calls if call["name"] == "."]
     assert root
     assert all(call["rd"] == 0 and call.get("server") is None
@@ -228,12 +223,15 @@ def test_tld_dnskey_query_uses_rd1_without_server(env):
             (call["name"] == "example." and call["type"] != "DS"))
     ]
     assert below
-    assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
-               for call in below)
-    direct = [call for call in env.lab.calls if call.get("direct")]
-    assert any(call["name"] == "user.example." and call["type"] == "NS"
-               for call in direct)
-    assert all(call["rd"] == 0 and call["type"] == "NS" for call in direct)
+    assert all(call["rd"] == 0 and call["do"] == 1 and call["server"] is None
+               and call.get("servers") for call in below)
+    apex_ns = [
+        call for call in env.lab.calls
+        if call["name"] == "user.example." and call["type"] == "NS"
+    ]
+    assert apex_ns
+    assert all(call["rd"] == 0 and call["do"] == 1 and call.get("servers")
+               for call in apex_ns)
     resolver = [call for call in env.lab.calls if not call.get("direct")]
     assert all(call["cd"] == env.settings.doh_cd for call in resolver)
 
@@ -245,6 +243,9 @@ def test_explicit_root_servers_are_used_for_root_zone_data(env):
                            server)] = env.lab.responses[(".", rdtype, "")]
     env.lab.responses[("example.", "DS",
                        server)] = env.lab.responses[("example.", "DS",
+                                                     "a.root-servers.net.")]
+    env.lab.responses[("example.", "NS",
+                       server)] = env.lab.responses[("example.", "NS",
                                                      "a.root-servers.net.")]
     env.lab.calls.clear()
     delegation = _walk_from_root(
@@ -274,11 +275,15 @@ def test_explicit_root_servers_are_used_for_root_zone_data(env):
     ]
     assert any(call["type"] == "DNSKEY" and call["name"] == "example."
                for call in other)
-    assert all(call["rd"] == 1 and call["do"] == 1 and call["server"] is None
-               for call in other)
-    direct = [call for call in env.lab.calls if call.get("direct")]
-    assert direct
-    assert all(call["type"] == "NS" and call["rd"] == 0 for call in direct)
+    assert all(call["rd"] == 0 and call["do"] == 1 and call["server"] is None
+               and call.get("servers") for call in other)
+    apex_ns = [
+        call for call in env.lab.calls
+        if call["name"] == env.lab.apex.to_text() and call["type"] == "NS"
+    ]
+    assert apex_ns
+    assert all(call["rd"] == 0 and call["do"] == 1 and call.get("servers")
+               for call in apex_ns)
 
 
 def test_lookup_error_text_is_logged_and_returned(env, syslog_lines):

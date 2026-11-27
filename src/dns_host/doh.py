@@ -1,13 +1,14 @@
 """DNS lookup interface and the Web3DNS-compatible DoH JSON client.
 
 Only the parameters documented for https://api.isthisyou.org/ are sent:
-``name``, ``type``, ``do``, ``rd``, ``server``, ``servers``, ``cd``. No other
-paths or query parameters are invented. ``server`` is one nameserver, used
-for root-zone data. ``servers`` is a comma-separated pair (or a final single
-name) of FQDNs or addresses; the API asks that pair and returns the fastest
-answer. ``do=1`` responses may carry base64 ``rdata``; that wire form is
-preferred over presentation text. A top-level ``Responder`` is kept when
-the API sends one.
+``name``, ``type``, ``do``, ``rd``, ``server``, ``servers``, ``cd``, and
+``ct``. ``ct=1`` is sent only when retrying an answer whose ``TC`` flag is
+set, which asks the API to use TCP. ``servers`` is a comma-separated pair
+(or a final single name) of FQDNs or addresses; the API asks that pair and
+returns the fastest answer. ``do=1`` responses may carry base64 ``rdata``;
+that wire form is preferred over presentation text. A top-level
+``Responder`` is kept when the API sends one. ``TC`` is kept on the
+response.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ class LookupResponse:
     additional: list[LookupRR] = field(default_factory=list)
     aa: bool = False
     responder: str | None = None
+    tc: bool = False
 
 
 class Lookup:
@@ -81,8 +83,13 @@ class Lookup:
         rd: int = 0,
         do: int = 1,
         cd: int | None = None,
+        tcp: bool = False,
     ) -> LookupResponse:
         raise NotImplementedError
+
+
+def _flag(value) -> bool:
+    return value is True or value == 1 or value == "1"
 
 
 def _responder(value) -> str | None:
@@ -154,6 +161,7 @@ def parse_doh_json(body: dict) -> LookupResponse:
         additional=_section(body.get("Additional")),
         aa=bool(body.get("AA", False)),
         responder=_responder(body.get("Responder")),
+        tc=_flag(body.get("TC")),
     )
 
 
@@ -173,8 +181,9 @@ class DohClient(Lookup):
         rd: int = 0,
         do: int = 1,
         cd: int | None = None,
+        tcp: bool = False,
     ) -> LookupResponse:
-        # Documented parameters only.
+        # Documented parameters only. ct=1 is the TCP retry.
         params = {
             "name": _fqdn(name),
             "type": str(rdtype),
@@ -184,9 +193,16 @@ class DohClient(Lookup):
         if servers:
             params["servers"] = _servers_param(servers)
         elif server:
-            params["server"] = _fqdn(server)
+            text = str(server).strip()
+            try:
+                ipaddress.ip_address(text)
+            except ValueError:
+                text = _fqdn(text)
+            params["server"] = text
         if cd is not None:
             params["cd"] = str(int(cd))
+        if tcp:
+            params["ct"] = "1"
         parts = urllib.parse.urlsplit(self.base_url)
         path = parts.path or "/"
         query = urllib.parse.urlencode(params)
