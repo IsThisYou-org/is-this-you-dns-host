@@ -24,6 +24,8 @@ def _publish_ds(lab, *ds_rdatas):
     ds = dns.rrset.from_rdata(lab.apex, 300, *ds_rdatas)
     sig = lab._sig(ds, lab.parent_zsk_priv, lab.parent_zsk, lab.parent)
     lab._put(lab.apex, "DS", None, ds, sig)
+    for server in lab.parent_ns:
+        lab._put(lab.apex, "DS", server, ds, sig)
 
 
 def _ds(lab, key, digest="SHA256"):
