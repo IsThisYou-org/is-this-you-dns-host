@@ -6,9 +6,11 @@ line per problem, and the process exits without a traceback. The process
 refuses to start when ``service_ns`` is unset. ``log_level`` defaults to
 ``info`` and must be a syslog severity name. ``axfr_allow`` defaults to
 empty; each entry is an IPv4 or IPv6 CIDR (a bare address is a /32 or /128)
-and a bad entry stops the process at startup. Tests construct ``Settings``
-directly. TSIG secrets may be inline or read from a file; they are never
-taken from a zone upload.
+and a bad entry stops the process at startup. ``allow-domains`` defaults to
+empty, which allows every domain. Each entry is a domain name. When the
+list is not empty, only a strict child of a listed name is accepted.
+Tests construct ``Settings`` directly. TSIG secrets may be inline or read
+from a file; they are never taken from a zone upload.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import dns.rdatatype
 import dns.rrset
 
 from dns_host.errors import ApiError
-from dns_host.names import normalise_name
+from dns_host.names import name_is_allowed, normalise_name
 from dns_host.rrtypes import DEFAULT_TYPES, STANDARD_ZONE_TYPES, ensure_wallet_type
 
 CONFIG_PATH = Path("/opt/data/etc/config.yaml")
@@ -96,6 +98,7 @@ _KNOWN_KEYS = frozenset(_INT_FIELDS) | {
     "service_ns",
     "secondaries",
     "axfr_allow",
+    "allow-domains",
     "resolver_base_url",
     "catalog_zone",
     "catalog_rname",
@@ -175,6 +178,41 @@ def parse_axfr_allow(value) -> list[str]:
                 "(a bare address is a /32 or /128)")
             continue
         canonical = str(network)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    if problems:
+        raise SystemExit("\n".join(problems))
+    return out
+
+
+def parse_allow_domains(value) -> list[str]:
+    """Return canonical domain names. A missing or empty list allows every domain.
+
+    Each entry must be a domain name. Names are stored lower-case, in DNS
+    form, without a trailing dot. A bad entry stops the process at startup.
+    """
+
+    if value is None or value == "" or value == []:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise SystemExit(
+            f"invalid allow-domains {value!r}: expected a list of domain names")
+    problems: list[str] = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            problems.append(
+                f"invalid allow-domains {item!r}: expected a domain name")
+            continue
+        try:
+            name = normalise_name(item, what="allow-domains")
+        except ApiError as exc:
+            problems.append(f"invalid allow-domains: {exc}")
+            continue
+        canonical = name.to_text().rstrip(".")
         if canonical in seen:
             continue
         seen.add(canonical)
@@ -310,6 +348,7 @@ class Settings:
     service_ns: list = field(default_factory=list)
     secondaries: list = field(default_factory=list)
     axfr_allow: list = field(default_factory=list)
+    allow_domains: list = field(default_factory=list)
     resolver_base_url: str = "https://api.isthisyou.org/"
     catalog_zone: object = None
     catalog_rname: object = None
@@ -360,9 +399,15 @@ class Settings:
         self.log_level = canonical
         set_log_level(canonical)
         self.axfr_allow = parse_axfr_allow(self.axfr_allow)
+        self.allow_domains = parse_allow_domains(self.allow_domains)
 
     def now(self) -> int:
         return int(self.now_fn())
+
+    def domain_allowed(self, name: object) -> bool:
+        """True when ``name`` may be uploaded under ``allow-domains``."""
+
+        return name_is_allowed(name, self.allow_domains)
 
     def require_service_ns(self) -> None:
         """Refuse to start when the public nameserver list was not configured."""
@@ -443,6 +488,9 @@ class Settings:
         axfr_allow = _guard(
             errors, "axfr_allow",
             lambda: parse_axfr_allow(raw.get("axfr_allow", [])), [])
+        allow_domains = _guard(
+            errors, "allow-domains",
+            lambda: parse_allow_domains(raw.get("allow-domains", [])), [])
         resolver = _resolver_base_url(raw, errors)
         failed: set[str] = set()
         ints: dict[str, int] = {}
@@ -458,6 +506,7 @@ class Settings:
             service_ns=service_ns,
             secondaries=secondaries,
             axfr_allow=axfr_allow,
+            allow_domains=allow_domains,
             resolver_base_url=resolver,
             catalog_zone=catalog,
             catalog_rname=rname,
@@ -1016,6 +1065,7 @@ def log_effective(settings: Settings) -> None:
         if settings.catalog_zone is not None else "",
         secondaries=secondaries,
         axfr_allow=list(settings.axfr_allow),
+        allow_domains=list(settings.allow_domains),
         grace_days=settings.grace_days,
         dns_bind=DNS_BIND,
         dns_port=DNS_PORT,

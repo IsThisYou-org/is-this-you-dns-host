@@ -16,6 +16,7 @@ from pathlib import Path
 from dns_host.catalogfile import Catalog, Member
 from dns_host.config import data_dir
 from dns_host.logutil import log
+from dns_host.names import allow_domain_error
 from dns_host.notifyplan import plan_notifies, send_plan
 from dns_host.spool import decode_job, pending
 from dns_host.wireaxfr import catalog_tcp_bytes
@@ -99,6 +100,15 @@ class Controller:
                 "dropping unreadable spool file",
                 path=str(path),
                 error=str(exc))
+            path.unlink(missing_ok=True)
+            return False
+        if not self.settings.domain_allowed(job.apex):
+            error = allow_domain_error(job.apex)
+            log("error",
+                "zone not installed",
+                apex=job.apex,
+                error=error.error,
+                message=error.message)
             path.unlink(missing_ok=True)
             return False
         held = self.catalog.serial_of(job.apex)

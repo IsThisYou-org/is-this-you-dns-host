@@ -114,6 +114,7 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 | `service_ns` | unset; the process refuses to start | Public nameservers. All of them must appear in the apex NS and in the parent delegation. |
 | `secondaries` | empty | IP, optional port, optional TSIG. NSD `provide-xfr` and `notify` are generated from this list. |
 | `axfr_allow` | empty | Extra CIDRs allowed to AXFR from NSD, for debugging. A bare address is a /32 or /128. `notify` is still generated only from `secondaries`. |
+| `allow-domains` | empty | Domains that may be uploaded. Empty allows every domain. Otherwise a domain is accepted only when it is a strict child of a listed name. The listed name itself is refused. |
 | `resolver_base_url` | `https://api.isthisyou.org/` | Base URL of a JSON DoH API (`Accept: application/dns-json`). Not a binary DoH endpoint (`application/dns-message`). |
 | `catalog_zone` | `catalog.example.net.` | Catalog zone apex (RFC 9432). |
 | `trusted_proxies` | empty | CIDRs allowed to supply `X-Forwarded-For` / `X-Forwarded-Proto` on the external listener. |
@@ -126,6 +127,8 @@ Publish port 9100 only on the internal network or the network where Prometheus r
 The example file lists the rate limits and the serial window. A TLD the ICANN root answers NXDOMAIN for is read from the resolver's local Handshake data. There is no Handshake trust-anchor setting.
 
 Secondaries are one list. Each entry is an IP, an optional port, and an optional TSIG key name, secret (or `tsig_secret_file`), and algorithm. The generated NSD pattern emits `provide-xfr` and `notify` for those addresses. `axfr_allow` adds `provide-xfr` lines with `NOKEY` for each subnet, on the catalog zone and on the member pattern. Those subnets are not NOTIFY targets. A value that is not an IPv4 or IPv6 CIDR stops the process at startup.
+
+`allow-domains` is a list of domain names. Omit it, or leave it empty, and every domain may be uploaded: that is the current behaviour. When the list is not empty, the name in the upload URL must be a strict child of one of those names. Comparison is on whole labels after lower-casing and stripping a trailing dot. `isthisyou.me` allows `james.isthisyou.me` and `a.b.isthisyou.me`. It refuses `isthisyou.me` and `notisthisyou.me`. The listed name itself is not accepted, so a parent zone that changes often can be named without hosting it. This is the first check. It uses only the URL apex, before the body is read and before any other validation, database work, or DNS lookup. A refused upload is HTTP 403 `domain_not_allowed`.
 
 ## Try an upload
 
@@ -178,6 +181,8 @@ SOA serial is unix time. It must be greater than the serial already stored, not 
 User zones are NSEC3 as in RFC 9276: iterations 0, empty salt, Opt-Out off. Plain NSEC zones are rejected. DNSKEY algorithm 13 or 15 (P-256 or Ed25519), with a flags-257 KSK. RRSIG lifetime is at most 30 days and the signature must be valid now. Current standard RR types plus WALLET (IANA type 262) are accepted when they validate. Obsolete, experimental, and private-use types (NULL, HINFO, MD, MF, MB, private-use numbers, and the like) are rejected before signature checks. `URI` and `WALLET` are accepted only at the zone apex. Each WALLET rdata is either two character-strings (type, identifier) or four (type, identifier, description, sort order). If the installed dnspython has no WALLET class, the same rdata is stored as RFC 3597 unknown-type wire.
 
 ### What the service checks, in order
+
+`allow-domains` is checked first, from the apex in the URL alone. A missing or empty list allows every domain. Otherwise a name that is not a strict child of a listed domain is refused with HTTP 403 `domain_not_allowed`, and the listed name itself is refused. That refusal happens before the body is read, before any other validation, and before any database or DNS lookup.
 
 Body size, then the per-IP upload rate, then JSON. After that, still offline: RRset, name, and rdata caps, owner names, one apex SOA, serial freshness, type policy, TTL bounds, DNSKEY, RRSIG metadata, the NSEC3 chain, apex NS contains every `service_ns`, and in-bailiwick NS names have A or AAAA glue. A one-label apex does not have to carry that glue: it is published at the parent root, and the resolver API resolves the hostname. Glue is checked before any parent query because it does not need the parent.
 

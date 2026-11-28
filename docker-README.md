@@ -71,6 +71,7 @@ Publish port 9100 only on the network where Prometheus runs. The service does no
 | `service_ns` | unset; start is refused | Public nameservers for this deployment. |
 | `secondaries` | empty | Address, optional port (default 53), optional TSIG. NSD `notify` and `provide-xfr` come from this list. |
 | `axfr_allow` | empty | Extra CIDRs allowed to AXFR, for debugging. A bare address is a /32 or /128. Not NOTIFY targets. |
+| `allow-domains` | empty | Domains that may be uploaded. Empty allows every domain. Otherwise only a strict child of a listed name is accepted. The listed name itself is refused. |
 | `resolver_base_url` | `https://api.isthisyou.org/` | JSON DoH API (`Accept: application/dns-json`). Not a binary DoH endpoint. |
 | `catalog_zone` | `catalog.example.net.` | Catalog zone apex (RFC 9432). |
 | `trusted_proxies` | empty | CIDRs allowed to send `X-Forwarded-For` and `X-Forwarded-Proto` on the external listener. |
@@ -78,6 +79,8 @@ Publish port 9100 only on the network where Prometheus runs. The service does no
 | `log_level` | `info` | Syslog severity (`debug`, `info`, `notice`, `warning`, `err`, `crit`, `alert`, `emerg`; `warn` and `error` are accepted). Production typically uses `warning`. |
 
 Port 80, NSD (`0.0.0.0:53`), `/opt/data`, and the ICANN trust-anchor file (`/app/deploy/root-anchors.ds`) are fixed by the image. They are not configuration keys.
+
+`allow-domains` matches whole labels after lower-casing and stripping a trailing dot. `isthisyou.me` allows `james.isthisyou.me` and `a.b.isthisyou.me`, and refuses `isthisyou.me` and `notisthisyou.me`. The check runs before any other validation, database work, or DNS lookup. A missing or empty list allows every domain.
 
 Admission uses HTTPS to `resolver_base_url`. The container does not send its own DNS queries for lookups. If `secondaries` is set, NSD sends NOTIFY by UDP to each configured address. A TLD the ICANN root answers NXDOMAIN for is read from the resolver's local Handshake data. There is no Handshake trust-anchor setting.
 
