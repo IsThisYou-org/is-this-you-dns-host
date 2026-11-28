@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from dns_host.catalogfile import Catalog
 from dns_host.errors import ApiError
 from dns_host.logutil import log
+from dns_host.names import allow_domain_error
 from dns_host.spool import encode_job, submit
 from dns_host.pipeline import (
     ds_matches,
@@ -34,6 +35,19 @@ _PARENT_CACHE_ERRORS = {
 
 def admit(body: dict, url_apex, settings, store, lookup, _notifier,
           client_ip: str) -> tuple[dict, int]:
+    # Same gate as the HTTP handler, before the catalog, the database, or
+    # any parent lookup. The handler returns earlier so a refused URL does
+    # not reach this function.
+    if not settings.domain_allowed(url_apex):
+        error = allow_domain_error(url_apex)
+        shown = url_apex.to_text() if hasattr(url_apex,
+                                               "to_text") else str(url_apex)
+        log("info",
+            "zone rejected",
+            apex=shown,
+            error=error.error,
+            message=error.message)
+        raise error
     try:
         # The API's serial check fails fast from the catalog the controller
         # publishes. The controller checks the serial again when it takes the

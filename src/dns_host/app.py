@@ -19,7 +19,7 @@ from dns_host.doh import DohClient
 from dns_host.errors import ApiError
 from dns_host.healthlog import SkipSuccessfulHealth
 from dns_host.logutil import log
-from dns_host.names import normalise_apex
+from dns_host.names import allow_domain_error, normalise_apex
 from dns_host.notify import UdpNotifier
 from dns_host.storage import Store
 
@@ -92,6 +92,16 @@ def create_app(settings: Settings | None = None,
 
     @app.post("/v1/zones/<path:apex>")
     def upload(apex: str):
+        # First check. The URL apex is enough: a refused name is not read,
+        # validated, stored, or looked up in DNS.
+        if not settings.domain_allowed(apex):
+            error = allow_domain_error(apex)
+            log("info",
+                "zone rejected",
+                apex=apex,
+                error=error.error,
+                message=error.message)
+            return jsonify(error.as_dict()), error.status
         client_ip = _client_ip()
         try:
             raw = _read_body(settings)

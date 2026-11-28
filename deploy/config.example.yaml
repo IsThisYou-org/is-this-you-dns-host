@@ -54,6 +54,16 @@ secondaries: []
 #   - 203.0.113.50
 axfr_allow: []
 
+# Domains that may be uploaded. Omit the key, or leave the list empty, to
+# allow every domain. Otherwise a name is accepted only when it is a strict
+# child of a listed name. The listed name itself is not accepted. Matching
+# uses whole labels after lower-casing and stripping a trailing dot, so
+# isthisyou.me allows james.isthisyou.me and a.b.isthisyou.me, but not
+# isthisyou.me or notisthisyou.me.
+# allow-domains:
+#   - isthisyou.me
+allow-domains: []
+
 # Set this to the TLS shedder network when using docker-compose.tls.yml.
 # The easy-nginx overlay uses 172.28.9.0/24.
 trusted_proxies: []
